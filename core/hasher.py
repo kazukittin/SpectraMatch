@@ -6,9 +6,12 @@ SpectraMatch - Image Hasher Module
 このモジュールは2種類のハッシュを提供:
 1. バイナリハッシュ (MD5) - 完全一致検出用
 2. Perceptual Hash (pHash) - 類似画像検出用（DCTベース）
+
+※ 日本語パス対応: cv2.imreadではなくnp.fromfile + cv2.imdecodeを使用
 """
 
 import hashlib
+import logging
 from enum import Enum
 from pathlib import Path
 from typing import Optional, Tuple
@@ -16,12 +19,49 @@ import numpy as np
 import cv2
 from scipy.fftpack import dct
 
+logger = logging.getLogger(__name__)
+
 
 class HashType(Enum):
     """ハッシュタイプの列挙型"""
     MD5 = "md5"           # バイナリ完全一致用
     SHA256 = "sha256"     # バイナリ完全一致用（より厳密）
     PHASH = "phash"       # Perceptual Hash（類似検出用）
+
+
+def imread_unicode(file_path: Path) -> Optional[np.ndarray]:
+    """
+    日本語/マルチバイト文字パス対応の画像読み込み
+    
+    cv2.imread()はWindows環境で日本語パスを読み込めないため、
+    np.fromfileでバイナリ読み込み → cv2.imdecodeでデコードする。
+    
+    Args:
+        file_path: 画像ファイルのパス
+        
+    Returns:
+        画像配列 (BGR)、失敗時はNone
+    """
+    try:
+        # バイナリとして読み込み
+        stream = np.fromfile(str(file_path), dtype=np.uint8)
+        if stream is None or len(stream) == 0:
+            logger.warning(f"[Load] ファイル読み込み失敗 (空): {file_path}")
+            return None
+        
+        # cv2.imdecodeでデコード
+        img = cv2.imdecode(stream, cv2.IMREAD_COLOR)
+        
+        if img is None:
+            logger.warning(f"[Load] 画像デコード失敗: {file_path}")
+            return None
+        
+        logger.debug(f"[Load] 成功: {file_path.name} shape={img.shape}")
+        return img
+        
+    except Exception as e:
+        logger.error(f"[Load] 例外: {file_path} - {e}")
+        return None
 
 
 class ImageHasher:
@@ -112,7 +152,9 @@ class ImageHasher:
             while chunk := f.read(8192):
                 hasher.update(chunk)
         
-        return hasher.hexdigest()
+        hash_value = hasher.hexdigest()
+        logger.debug(f"[Hash] {file_path.name}: {hash_type.value}={hash_value[:16]}...")
+        return hash_value
     
     def compute_phash(self, file_path: Path) -> Optional[np.ndarray]:
         """
@@ -133,9 +175,10 @@ class ImageHasher:
             64要素のbool配列（pHash）、失敗時はNone
         """
         try:
-            # 画像を読み込み
-            img = cv2.imread(str(file_path))
+            # 日本語パス対応の画像読み込み
+            img = imread_unicode(file_path)
             if img is None:
+                logger.warning(f"[pHash] 画像読み込み失敗: {file_path}")
                 return None
             
             # グレースケールに変換
@@ -152,57 +195,39 @@ class ImageHasher:
             img_float = np.float64(resized)
             
             # 2D DCT（離散コサイン変換）を適用
-            # DCTは画像を周波数成分に分解する
-            # 左上ほど低周波（画像の大まかな構造）、右下ほど高周波（細部）
             dct_result = dct(dct(img_float, axis=0, norm='ortho'), axis=1, norm='ortho')
             
             # 左上8x8の低周波成分を抽出
-            # この領域が画像の「本質的な特徴」を表す
             low_freq_size = self.PHASH_SIZE // self.PHASH_HIGHFREQ_FACTOR
             dct_low = dct_result[:low_freq_size, :low_freq_size]
             
-            # DC成分（左上角、画像全体の平均輝度）を除外して平均を計算
-            # DC成分は照明条件に強く依存するため除外
+            # DC成分を除外して中央値を計算
             dct_flat = dct_low.flatten()
-            dct_without_dc = dct_flat[1:]  # DC成分を除く
+            dct_without_dc = dct_flat[1:]
             median_val = np.median(dct_without_dc)
             
-            # 各成分を中央値と比較し、バイナリハッシュを生成
-            # 中央値より大きければ1、小さければ0
+            # バイナリハッシュを生成
             phash = dct_flat > median_val
+            
+            # デバッグログ
+            phash_int = self.phash_to_int(phash)
+            logger.debug(f"[pHash] {file_path.name}: hash={phash_int:016x}")
             
             return phash
             
         except Exception as e:
-            # 読み込み失敗時はNoneを返す
+            logger.error(f"[pHash] 例外: {file_path} - {e}")
             return None
     
     def phash_to_int(self, phash: np.ndarray) -> int:
-        """
-        pHash配列を整数に変換
-        
-        Args:
-            phash: 64要素のbool配列
-            
-        Returns:
-            64bit整数
-        """
-        # bool配列を整数に変換
+        """pHash配列を整数に変換"""
         hash_int = 0
         for bit in phash:
             hash_int = (hash_int << 1) | int(bit)
         return hash_int
     
     def phash_to_hex(self, phash: np.ndarray) -> str:
-        """
-        pHash配列を16進数文字列に変換
-        
-        Args:
-            phash: 64要素のbool配列
-            
-        Returns:
-            16文字の16進数文字列
-        """
+        """pHash配列を16進数文字列に変換"""
         hash_int = self.phash_to_int(phash)
         return format(hash_int, '016x')
     
@@ -216,46 +241,18 @@ class ImageHasher:
         - 距離1-5: 非常に類似（ほぼ同一画像）
         - 距離6-10: 類似（同じ画像の異なるバージョン）
         - 距離11以上: 異なる画像の可能性が高い
-        
-        Args:
-            hash1: 1つ目のpHash
-            hash2: 2つ目のpHash
-            
-        Returns:
-            ハミング距離（0-64）
         """
-        # XORで異なるビットを検出し、Trueの数をカウント
-        return np.sum(hash1 != hash2)
+        return int(np.sum(hash1 != hash2))
     
     @staticmethod
     def hamming_distance_int(hash1: int, hash2: int) -> int:
-        """
-        2つの整数pHash間のハミング距離を計算
-        
-        Args:
-            hash1: 1つ目のpHash（整数）
-            hash2: 2つ目のpHash（整数）
-            
-        Returns:
-            ハミング距離（0-64）
-        """
-        # XORして異なるビットを検出、1の数をカウント
+        """2つの整数pHash間のハミング距離を計算"""
         xor = hash1 ^ hash2
         return bin(xor).count('1')
     
     def compute_sharpness(self, file_path: Path) -> Tuple[float, int, int]:
         """
         ブレ検知（鮮明度スコア）と解像度を計算
-        
-        Laplacian（ラプラシアン）フィルタの分散を使用。
-        - 高い値 = より鮮明な画像（エッジが多い）
-        - 低い値 = ブレている/ぼやけている画像
-        
-        一般的な目安:
-        - < 100: かなりブレている
-        - 100-300: 軽微なブレ
-        - 300-500: 普通
-        - > 500: 鮮明
         
         Args:
             file_path: 対象画像ファイルのパス
@@ -265,7 +262,8 @@ class ImageHasher:
             失敗時は (0.0, 0, 0)
         """
         try:
-            img = cv2.imread(str(file_path))
+            # 日本語パス対応
+            img = imread_unicode(file_path)
             if img is None:
                 return 0.0, 0, 0
             
@@ -278,26 +276,16 @@ class ImageHasher:
                 gray = img
             
             # Laplacianフィルタを適用し、分散を計算
-            # Laplacianは2次微分であり、エッジを強調する
-            # 分散が高い = エッジが多い = 鮮明な画像
             laplacian = cv2.Laplacian(gray, cv2.CV_64F)
             sharpness = laplacian.var()
             
             return float(sharpness), width, height
             
         except Exception as e:
+            logger.error(f"[Sharpness] 例外: {file_path} - {e}")
             return 0.0, 0, 0
     
     def get_image_metadata(self, file_path: Path) -> Tuple[int, int, float]:
-        """
-        画像のメタデータを取得
-        
-        Args:
-            file_path: 対象画像ファイルのパス
-            
-        Returns:
-            (幅, 高さ, 鮮明度スコア) のタプル
-        """
+        """画像のメタデータを取得"""
         sharpness, width, height = self.compute_sharpness(file_path)
         return width, height, sharpness
-

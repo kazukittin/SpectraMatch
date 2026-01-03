@@ -174,8 +174,16 @@ class ImageScanner(QObject):
             phash_int = 0
             if phash is not None:
                 phash_int = self.hasher.phash_to_int(phash)
+                # デバッグ: ハッシュ値がオール0でないか確認
+                if phash_int == 0:
+                    logger.warning(f"[Hash] オール0ハッシュ: {file_path.name}")
+            else:
+                logger.warning(f"[Hash] pHash計算失敗: {file_path.name}")
             
             sharpness, width, height = self.hasher.compute_sharpness(file_path)
+            
+            # デバッグログ
+            logger.debug(f"[Process] {file_path.name}: size={file_size}, {width}x{height}, phash={phash_int:016x}, blur={sharpness:.1f}")
             
             return {
                 'path': file_path,
@@ -419,13 +427,20 @@ class ImageScanner(QObject):
     def _find_groups_phash_numpy(self, threshold: int) -> List[SimilarityGroup]:
         """NumPyによるpHashグループ化（フォールバック）"""
         phash_data = self.db.get_all_phashes()
+        logger.info(f"[Compare] pHashデータ数: {len(phash_data)}, 閾値: {threshold}")
+        
         if len(phash_data) < 2:
+            logger.warning("[Compare] pHashデータが2件未満のため比較をスキップ")
             return []
         
         n = len(phash_data)
         ids = [item[0] for item in phash_data]
         paths = [item[1] for item in phash_data]
         phashes = np.array([item[2] for item in phash_data], dtype=np.uint64)
+        
+        # デバッグ: ユニークなハッシュ数を確認
+        unique_hashes = len(set(phashes.tolist()))
+        logger.info(f"[Compare] ユニークハッシュ数: {unique_hashes}/{n}")
         
         # ベクトル化ハミング距離
         xor_matrix = phashes[:, np.newaxis] ^ phashes[np.newaxis, :]
@@ -439,10 +454,22 @@ class ImageScanner(QObject):
             return result
         
         distance_matrix = popcount_vec(xor_matrix)
+        
+        # デバッグ: 距離行列の統計（対角線以外）
+        upper_tri = np.triu_indices(n, k=1)
+        distances_upper = distance_matrix[upper_tri]
+        if len(distances_upper) > 0:
+            logger.info(f"[Compare] 距離統計: min={distances_upper.min()}, max={distances_upper.max()}, mean={distances_upper.mean():.2f}")
+            # 距離0のペア数（完全一致）
+            exact_matches = np.sum(distances_upper == 0)
+            logger.info(f"[Compare] 完全一致ペア数 (距離=0): {exact_matches}")
+        
         similar_pairs = np.argwhere(
             (distance_matrix <= threshold) & 
             (np.triu(np.ones((n, n), dtype=bool), k=1))
         )
+        
+        logger.info(f"[Compare] 閾値{threshold}以下のペア数: {len(similar_pairs)}")
         
         # Union-Find
         parent = list(range(n))

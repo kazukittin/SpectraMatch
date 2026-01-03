@@ -147,7 +147,7 @@ class ImageCard(QFrame):
         self._load_thumbnail()
     
     def _load_thumbnail(self):
-        """サムネイルを読み込み（キャッシュ対応）"""
+        """サムネイルを読み込み（キャッシュ対応・日本語パス対応）"""
         global _thumbnail_cache
         
         path_str = str(self.image_info.path)
@@ -159,7 +159,13 @@ class ImageCard(QFrame):
             return
         
         try:
-            img = cv2.imread(path_str)
+            # 日本語パス対応: np.fromfile + cv2.imdecode
+            stream = np.fromfile(path_str, dtype=np.uint8)
+            if stream is None or len(stream) == 0:
+                self.thumbnail_label.setText("読込失敗")
+                return
+            
+            img = cv2.imdecode(stream, cv2.IMREAD_COLOR)
             if img is None:
                 self.thumbnail_label.setText("読込失敗")
                 return
@@ -176,7 +182,6 @@ class ImageCard(QFrame):
             
             # キャッシュに保存（上限チェック）
             if len(_thumbnail_cache) >= _CACHE_MAX_SIZE:
-                # 古いエントリを削除
                 oldest_key = next(iter(_thumbnail_cache))
                 del _thumbnail_cache[oldest_key]
             

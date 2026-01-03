@@ -20,11 +20,12 @@ from PySide6.QtGui import QFont
 from gui.main_window import MainWindow
 
 
-def setup_logging():
+def setup_logging(debug: bool = False):
     """ロギングの設定"""
     log_format = "%(asctime)s - %(name)s - %(levelname)s - %(message)s"
+    level = logging.DEBUG if debug else logging.INFO
     logging.basicConfig(
-        level=logging.INFO,
+        level=level,
         format=log_format,
         handlers=[
             logging.StreamHandler(sys.stdout),
@@ -35,9 +36,13 @@ def setup_logging():
 
 def main():
     """アプリケーションのエントリーポイント"""
-    setup_logging()
+    # デバッグモードの確認
+    debug_mode = "--debug" in sys.argv or "-d" in sys.argv
+    setup_logging(debug=debug_mode)
     logger = logging.getLogger(__name__)
     logger.info("SpectraMatch を起動しています...")
+    if debug_mode:
+        logger.info("デバッグモード有効")
     
     # High DPI対応
     QApplication.setHighDpiScaleFactorRoundingPolicy(

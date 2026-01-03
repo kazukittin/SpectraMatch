@@ -134,7 +134,8 @@ class MainWindow(QMainWindow):
         layout.addWidget(algo_section)
         
         self.algo_combo = QComboBox()
-        self.algo_combo.addItem("🔷 pHash (高速)", ScanMode.PHASH)
+        # CLIPのみモード (pHashは一時的に無効)
+        # self.algo_combo.addItem("🔷 pHash (高速)", ScanMode.PHASH)
         self.algo_combo.addItem("🤖 AI Semantic (CLIP)", ScanMode.AI_CLIP)
         self.algo_combo.setStyleSheet("""
             QComboBox {
@@ -160,9 +161,9 @@ class MainWindow(QMainWindow):
         self.algo_combo.currentIndexChanged.connect(self._on_algorithm_changed)
         layout.addWidget(self.algo_combo)
         
-        # アルゴリズム説明
-        self.algo_desc = QLabel("DCTベースのPerceptual Hash\n高速で軽量、リサイズ・圧縮に強い")
-        self.algo_desc.setStyleSheet("color: #808080; font-size: 10px;")
+        # アルゴリズム説明 (CLIP用)
+        self.algo_desc = QLabel("OpenAI CLIPによるセマンティック検索\n意味的類似性を捉える高精度モード")
+        self.algo_desc.setStyleSheet("color: #9b59b6; font-size: 10px;")
         self.algo_desc.setWordWrap(True)
         layout.addWidget(self.algo_desc)
         
@@ -172,26 +173,26 @@ class MainWindow(QMainWindow):
         sep3.setStyleSheet("background-color: #4a4a4a;")
         layout.addWidget(sep3)
         
-        # 閾値設定セクション
-        self.threshold_section = QLabel("🎚️ 類似度閾値 (ハミング距離)")
+        # 閾値設定セクション (CLIPモードデフォルト)
+        self.threshold_section = QLabel("🎚️ 類似度閾値 (類似度%)")
         self.threshold_section.setObjectName("sectionLabel")
         layout.addWidget(self.threshold_section)
 
         
-        # スライダーと値表示
+        # スライダーと値表示 (CLIPモード: 50-99%)
         slider_layout = QHBoxLayout()
         slider_layout.setSpacing(12)
         
         self.threshold_slider = QSlider(Qt.Horizontal)
-        self.threshold_slider.setRange(0, 20)
-        self.threshold_slider.setValue(10)
+        self.threshold_slider.setRange(50, 99)
+        self.threshold_slider.setValue(85)
         self.threshold_slider.setTickPosition(QSlider.TicksBelow)
-        self.threshold_slider.setTickInterval(5)
+        self.threshold_slider.setTickInterval(10)
         self.threshold_slider.valueChanged.connect(self._on_threshold_changed)
         slider_layout.addWidget(self.threshold_slider)
         
-        self.threshold_value_label = QLabel("10")
-        self.threshold_value_label.setFixedWidth(30)
+        self.threshold_value_label = QLabel("85%")
+        self.threshold_value_label.setFixedWidth(40)
         self.threshold_value_label.setAlignment(Qt.AlignCenter)
         self.threshold_value_label.setStyleSheet(
             "background-color: #00ffff; color: #1e1e1e; "
@@ -202,7 +203,7 @@ class MainWindow(QMainWindow):
         layout.addLayout(slider_layout)
         
         # 閾値説明
-        self.threshold_desc = QLabel("標準 (同一画像の異なるバージョン)")
+        self.threshold_desc = QLabel("標準 (85%以上を類似とみなす)")
         self.threshold_desc.setStyleSheet("color: #808080; font-size: 11px;")
         layout.addWidget(self.threshold_desc)
         
