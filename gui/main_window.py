@@ -1,0 +1,573 @@
+# -*- coding: utf-8 -*-
+"""
+SpectraMatch - Main Window
+QSplitterを使用した左サイドバー + 右メインエリアのレイアウト
+アルゴリズム選択: pHash (高速) / AI CLIP (高精度)
+"""
+
+import os
+import logging
+from pathlib import Path
+from typing import List
+
+from PySide6.QtCore import Qt, Slot
+from PySide6.QtWidgets import (
+    QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
+    QLabel, QPushButton, QSlider, QProgressBar,
+    QFileDialog, QMessageBox, QFrame, QApplication,
+    QSplitter, QListWidget, QListWidgetItem, QSizePolicy,
+    QComboBox
+)
+from PySide6.QtGui import QFont
+
+from core.scanner import ImageScanner, ScanResult, ScanMode
+from core.comparator import SimilarityGroup
+from .image_grid import ImageGridWidget
+from .styles import DarkTheme
+
+logger = logging.getLogger(__name__)
+
+
+class MainWindow(QMainWindow):
+    """
+    SpectraMatch メインウィンドウ
+    
+    レイアウト:
+    - QSplitter で左サイドバー(300px) と右メインエリアを分割
+    - 左: スキャン対象フォルダリスト、閾値スライダー、スキャンボタン
+    - 右: 類似グループ結果表示
+    """
+    
+    def __init__(self):
+        super().__init__()
+        self.scanner = ImageScanner()
+        self.current_folders: List[Path] = []
+        self.scan_result: ScanResult = None
+        
+        self._setup_ui()
+        self._connect_signals()
+    
+    def _setup_ui(self):
+        self.setWindowTitle("SpectraMatch - 画像類似検出・削除ツール")
+        self.setMinimumSize(1280, 800)
+        self.resize(1400, 900)
+        self.setStyleSheet(DarkTheme.get_stylesheet())
+        
+        # メインスプリッター
+        splitter = QSplitter(Qt.Horizontal)
+        splitter.setHandleWidth(3)
+        self.setCentralWidget(splitter)
+        
+        # 左サイドバー
+        sidebar = self._create_sidebar()
+        splitter.addWidget(sidebar)
+        
+        # 右メインエリア
+        main_area = self._create_main_area()
+        splitter.addWidget(main_area)
+        
+        # 初期サイズ比率 (サイドバー:メインエリア = 300:残り)
+        splitter.setSizes([300, 1100])
+        splitter.setStretchFactor(0, 0)  # サイドバーは固定
+        splitter.setStretchFactor(1, 1)  # メインエリアは伸縮
+    
+    def _create_sidebar(self) -> QWidget:
+        """左サイドバーを作成"""
+        sidebar = QWidget()
+        sidebar.setObjectName("sidebarWidget")
+        sidebar.setMinimumWidth(280)
+        sidebar.setMaximumWidth(400)
+        
+        layout = QVBoxLayout(sidebar)
+        layout.setContentsMargins(16, 16, 16, 16)
+        layout.setSpacing(16)
+        
+        # タイトル
+        title = QLabel("SpectraMatch")
+        title.setObjectName("titleLabel")
+        layout.addWidget(title)
+        
+        subtitle = QLabel("画像類似検出・削除ツール")
+        subtitle.setStyleSheet("color: #808080; font-size: 11px; margin-bottom: 10px;")
+        layout.addWidget(subtitle)
+        
+        # 区切り線
+        sep1 = QFrame()
+        sep1.setFrameShape(QFrame.HLine)
+        sep1.setStyleSheet("background-color: #4a4a4a;")
+        layout.addWidget(sep1)
+        
+        # スキャン対象フォルダセクション
+        folder_section = QLabel("📁 スキャン対象フォルダ")
+        folder_section.setObjectName("sectionLabel")
+        layout.addWidget(folder_section)
+        
+        # フォルダリスト
+        self.folder_list = QListWidget()
+        self.folder_list.setMinimumHeight(120)
+        self.folder_list.setMaximumHeight(200)
+        layout.addWidget(self.folder_list)
+        
+        # フォルダ操作ボタン
+        folder_btn_layout = QHBoxLayout()
+        folder_btn_layout.setSpacing(8)
+        
+        self.add_folder_btn = QPushButton("+ 追加")
+        self.add_folder_btn.clicked.connect(self._on_add_folder)
+        folder_btn_layout.addWidget(self.add_folder_btn)
+        
+        self.remove_folder_btn = QPushButton("- 削除")
+        self.remove_folder_btn.clicked.connect(self._on_remove_folder)
+        folder_btn_layout.addWidget(self.remove_folder_btn)
+        
+        layout.addLayout(folder_btn_layout)
+        
+        # 区切り線
+        sep2 = QFrame()
+        sep2.setFrameShape(QFrame.HLine)
+        sep2.setStyleSheet("background-color: #4a4a4a;")
+        layout.addWidget(sep2)
+        
+        # アルゴリズム選択セクション
+        algo_section = QLabel("🧠 検出アルゴリズム")
+        algo_section.setObjectName("sectionLabel")
+        layout.addWidget(algo_section)
+        
+        self.algo_combo = QComboBox()
+        self.algo_combo.addItem("🔷 pHash (高速)", ScanMode.PHASH)
+        self.algo_combo.addItem("🤖 AI Semantic (CLIP)", ScanMode.AI_CLIP)
+        self.algo_combo.setStyleSheet("""
+            QComboBox {
+                background-color: #3c3c3c;
+                border: 1px solid #4a4a4a;
+                border-radius: 4px;
+                padding: 8px;
+                font-size: 13px;
+            }
+            QComboBox:hover {
+                border-color: #00ffff;
+            }
+            QComboBox::drop-down {
+                border: none;
+                width: 30px;
+            }
+            QComboBox QAbstractItemView {
+                background-color: #2b2b2b;
+                selection-background-color: #00ffff;
+                selection-color: #1e1e1e;
+            }
+        """)
+        self.algo_combo.currentIndexChanged.connect(self._on_algorithm_changed)
+        layout.addWidget(self.algo_combo)
+        
+        # アルゴリズム説明
+        self.algo_desc = QLabel("DCTベースのPerceptual Hash\n高速で軽量、リサイズ・圧縮に強い")
+        self.algo_desc.setStyleSheet("color: #808080; font-size: 10px;")
+        self.algo_desc.setWordWrap(True)
+        layout.addWidget(self.algo_desc)
+        
+        # 区切り線
+        sep3 = QFrame()
+        sep3.setFrameShape(QFrame.HLine)
+        sep3.setStyleSheet("background-color: #4a4a4a;")
+        layout.addWidget(sep3)
+        
+        # 閾値設定セクション
+        self.threshold_section = QLabel("🎚️ 類似度閾値 (ハミング距離)")
+        self.threshold_section.setObjectName("sectionLabel")
+        layout.addWidget(self.threshold_section)
+
+        
+        # スライダーと値表示
+        slider_layout = QHBoxLayout()
+        slider_layout.setSpacing(12)
+        
+        self.threshold_slider = QSlider(Qt.Horizontal)
+        self.threshold_slider.setRange(0, 20)
+        self.threshold_slider.setValue(10)
+        self.threshold_slider.setTickPosition(QSlider.TicksBelow)
+        self.threshold_slider.setTickInterval(5)
+        self.threshold_slider.valueChanged.connect(self._on_threshold_changed)
+        slider_layout.addWidget(self.threshold_slider)
+        
+        self.threshold_value_label = QLabel("10")
+        self.threshold_value_label.setFixedWidth(30)
+        self.threshold_value_label.setAlignment(Qt.AlignCenter)
+        self.threshold_value_label.setStyleSheet(
+            "background-color: #00ffff; color: #1e1e1e; "
+            "font-weight: bold; border-radius: 4px; padding: 4px;"
+        )
+        slider_layout.addWidget(self.threshold_value_label)
+        
+        layout.addLayout(slider_layout)
+        
+        # 閾値説明
+        self.threshold_desc = QLabel("標準 (同一画像の異なるバージョン)")
+        self.threshold_desc.setStyleSheet("color: #808080; font-size: 11px;")
+        layout.addWidget(self.threshold_desc)
+        
+        # 区切り線
+        sep3 = QFrame()
+        sep3.setFrameShape(QFrame.HLine)
+        sep3.setStyleSheet("background-color: #4a4a4a;")
+        layout.addWidget(sep3)
+        
+        # スキャンボタン
+        self.scan_btn = QPushButton("🔍 スキャン開始")
+        self.scan_btn.setObjectName("scanButton")
+        self.scan_btn.setMinimumHeight(48)
+        self.scan_btn.setEnabled(False)
+        self.scan_btn.clicked.connect(self._on_start_scan)
+        layout.addWidget(self.scan_btn)
+        
+        # 中止ボタン
+        self.stop_btn = QPushButton("⏹ 中止")
+        self.stop_btn.setMinimumHeight(40)
+        self.stop_btn.setVisible(False)
+        self.stop_btn.setStyleSheet(
+            "background-color: #e74c3c; color: white; font-weight: bold;"
+        )
+        self.stop_btn.clicked.connect(self._on_stop_scan)
+        layout.addWidget(self.stop_btn)
+        
+        # プログレスバー
+        self.progress_bar = QProgressBar()
+        self.progress_bar.setVisible(False)
+        self.progress_bar.setTextVisible(False)
+        layout.addWidget(self.progress_bar)
+        
+        self.progress_label = QLabel("")
+        self.progress_label.setStyleSheet("color: #b0b0b0; font-size: 11px;")
+        self.progress_label.setWordWrap(True)
+        layout.addWidget(self.progress_label)
+        
+        layout.addStretch()
+        
+        # 区切り線
+        sep4 = QFrame()
+        sep4.setFrameShape(QFrame.HLine)
+        sep4.setStyleSheet("background-color: #4a4a4a;")
+        layout.addWidget(sep4)
+        
+        # 削除セクション
+        self.delete_count_label = QLabel("")
+        self.delete_count_label.setStyleSheet("color: #e74c3c; font-weight: bold;")
+        layout.addWidget(self.delete_count_label)
+        
+        self.delete_btn = QPushButton("🗑️ 選択した画像を削除")
+        self.delete_btn.setObjectName("deleteButton")
+        self.delete_btn.setMinimumHeight(44)
+        self.delete_btn.setEnabled(False)
+        self.delete_btn.clicked.connect(self._on_delete_files)
+        layout.addWidget(self.delete_btn)
+        
+        return sidebar
+    
+    def _create_main_area(self) -> QWidget:
+        """右メインエリアを作成"""
+        main_widget = QWidget()
+        layout = QVBoxLayout(main_widget)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(0)
+        
+        # ヘッダー（ツールバー）
+        header = QWidget()
+        header.setStyleSheet("background-color: #2b2b2b; border-bottom: 1px solid #4a4a4a;")
+        header_layout = QHBoxLayout(header)
+        header_layout.setContentsMargins(20, 12, 20, 12)
+        header_layout.setSpacing(16)
+        
+        results_title = QLabel("📊 検出結果")
+        results_title.setStyleSheet("font-size: 16px; font-weight: bold;")
+        header_layout.addWidget(results_title)
+        
+        # スマート自動選択ボタン（ツールバー）
+        self.smart_select_btn = QPushButton("⚡ 全グループをスマート選択")
+        self.smart_select_btn.setStyleSheet(
+            "background-color: #9b59b6; color: white; "
+            "font-weight: bold; padding: 8px 16px; border-radius: 4px;"
+        )
+        self.smart_select_btn.setToolTip(
+            "全グループで品質（解像度・鮮明度・サイズ）に基づいて\n"
+            "最良の画像を残し、他を削除対象に自動選択します"
+        )
+        self.smart_select_btn.setEnabled(False)
+        self.smart_select_btn.clicked.connect(self._on_smart_select_all)
+        header_layout.addWidget(self.smart_select_btn)
+        
+        header_layout.addStretch()
+        
+        self.status_label = QLabel("フォルダを追加してスキャンを開始してください")
+        self.status_label.setStyleSheet("color: #808080;")
+        header_layout.addWidget(self.status_label)
+        
+        layout.addWidget(header)
+        
+        # 結果グリッド
+        self.image_grid = ImageGridWidget()
+        layout.addWidget(self.image_grid, 1)
+        
+        return main_widget
+    
+    def _connect_signals(self):
+        """シグナル接続"""
+        self.scanner.progress_updated.connect(self._on_progress_updated)
+        self.scanner.scan_completed.connect(self._on_scan_completed)
+        self.scanner.scan_error.connect(self._on_scan_error)
+        self.image_grid.files_to_delete_changed.connect(self._on_delete_count_changed)
+    
+    @Slot()
+    def _on_add_folder(self):
+        """フォルダ追加"""
+        folder = QFileDialog.getExistingDirectory(self, "スキャン対象フォルダを選択")
+        if folder:
+            path = Path(folder)
+            if path not in self.current_folders:
+                self.current_folders.append(path)
+                item = QListWidgetItem(path.name)
+                item.setToolTip(str(path))
+                item.setData(Qt.UserRole, path)
+                self.folder_list.addItem(item)
+                self.scan_btn.setEnabled(True)
+    
+    @Slot()
+    def _on_remove_folder(self):
+        """選択フォルダ削除"""
+        current = self.folder_list.currentItem()
+        if current:
+            path = current.data(Qt.UserRole)
+            if path in self.current_folders:
+                self.current_folders.remove(path)
+            self.folder_list.takeItem(self.folder_list.row(current))
+            
+            if not self.current_folders:
+                self.scan_btn.setEnabled(False)
+    
+    @Slot(int)
+    def _on_threshold_changed(self, value: int):
+        """閾値変更"""
+        self.threshold_value_label.setText(str(value))
+        
+        if value <= 3:
+            desc = "厳密 (ほぼ同一画像のみ)"
+        elif value <= 6:
+            desc = "やや厳密 (高い類似度)"
+        elif value <= 10:
+            desc = "標準 (同一画像の異なるバージョン)"
+        elif value <= 15:
+            desc = "緩い (類似した構図)"
+        else:
+            desc = "非常に緩い (要注意)"
+        
+        self.threshold_desc.setText(desc)
+    
+    @Slot(int)
+    def _on_algorithm_changed(self, index: int):
+        """アルゴリズム変更時"""
+        mode = self.algo_combo.currentData()
+        
+        if mode == ScanMode.AI_CLIP:
+            # AIモード
+            self.algo_desc.setText(
+                "OpenAI CLIPによるセマンティック検索\n"
+                "意味的類似性を捉える高精度モード"
+            )
+            self.threshold_section.setText("🎚️ 類似度閾値 (類似度%)")
+            
+            # スライダーをパーセンテージに変更
+            self.threshold_slider.blockSignals(True)
+            self.threshold_slider.setRange(50, 99)
+            self.threshold_slider.setValue(85)
+            self.threshold_slider.blockSignals(False)
+            self.threshold_value_label.setText("85%")
+            self.threshold_desc.setText("標準 (85%以上を類似とみなす)")
+            
+            # CLIP利用可能か確認
+            if not self.scanner.is_clip_available():
+                self.algo_desc.setText(
+                    "⚠️ CLIPが利用できません\n"
+                    "pip install torch transformers\n"
+                    "を実行してください"
+                )
+                self.algo_desc.setStyleSheet("color: #e74c3c; font-size: 10px;")
+            else:
+                self.algo_desc.setStyleSheet("color: #9b59b6; font-size: 10px;")
+        else:
+            # pHashモード
+            self.algo_desc.setText(
+                "DCTベースのPerceptual Hash\n"
+                "高速で軽量、リサイズ・圧縮に強い"
+            )
+            self.algo_desc.setStyleSheet("color: #808080; font-size: 10px;")
+            self.threshold_section.setText("🎚️ 類似度閾値 (ハミング距離)")
+            
+            # スライダーをハミング距離に変更
+            self.threshold_slider.blockSignals(True)
+            self.threshold_slider.setRange(0, 20)
+            self.threshold_slider.setValue(10)
+            self.threshold_slider.blockSignals(False)
+            self.threshold_value_label.setText("10")
+            self.threshold_desc.setText("標準 (同一画像の異なるバージョン)")
+    
+    @Slot()
+    def _on_start_scan(self):
+        """スキャン開始"""
+        if not self.current_folders:
+            return
+        
+        self.scan_btn.setEnabled(False)
+        self.scan_btn.setVisible(False)
+        self.stop_btn.setVisible(True)
+        self.add_folder_btn.setEnabled(False)
+        self.remove_folder_btn.setEnabled(False)
+        self.algo_combo.setEnabled(False)
+        self.delete_btn.setEnabled(False)
+        self.smart_select_btn.setEnabled(False)
+        self.image_grid.clear()
+        self.progress_bar.setVisible(True)
+        self.progress_bar.setValue(0)
+        
+        threshold = self.threshold_slider.value()
+        mode = self.algo_combo.currentData()
+        
+        # 最初のフォルダをスキャン
+        self.scanner.start_scan(self.current_folders[0], threshold, mode=mode)
+    
+    @Slot()
+    def _on_stop_scan(self):
+        """スキャン中止"""
+        self.progress_label.setText("中止中...")
+        self.stop_btn.setEnabled(False)
+        self.scanner.stop_scan()
+    
+    @Slot(int, int, str)
+    def _on_progress_updated(self, current: int, total: int, message: str):
+        """進捗更新"""
+        if total > 0:
+            self.progress_bar.setMaximum(total)
+            self.progress_bar.setValue(current)
+        self.progress_label.setText(message)
+    
+    @Slot(object)
+    def _on_scan_completed(self, result: ScanResult):
+        """スキャン完了"""
+        self.scan_result = result
+        
+        # ボタン状態を復元
+        self.scan_btn.setEnabled(True)
+        self.scan_btn.setVisible(True)
+        self.stop_btn.setVisible(False)
+        self.stop_btn.setEnabled(True)
+        self.add_folder_btn.setEnabled(True)
+        self.remove_folder_btn.setEnabled(True)
+        self.algo_combo.setEnabled(True)
+        self.progress_bar.setVisible(False)
+        
+        if result.groups:
+            self.image_grid.set_groups(result.groups)
+            total_images = sum(g.count for g in result.groups)
+            cache_info = f", キャッシュ: {result.cached_files}" if result.cached_files > 0 else ""
+            self.status_label.setText(
+                f"✅ {len(result.groups)}グループ / {total_images}枚 "
+                f"(処理: {result.processed_files}{cache_info}, スキップ: {result.skipped_files})"
+            )
+            self.status_label.setStyleSheet("color: #2ecc71;")
+            self.progress_label.setText("スキャン完了")
+            self.smart_select_btn.setEnabled(True)
+        else:
+            cache_info = f", キャッシュ: {result.cached_files}" if result.cached_files > 0 else ""
+            self.status_label.setText(
+                f"類似画像なし (処理: {result.processed_files}{cache_info})"
+            )
+            self.status_label.setStyleSheet("color: #3498db;")
+            self.progress_label.setText("類似画像は見つかりませんでした")
+            self.smart_select_btn.setEnabled(False)
+    
+    @Slot(str)
+    def _on_scan_error(self, error: str):
+        """スキャンエラー"""
+        self.scan_btn.setEnabled(True)
+        self.scan_btn.setVisible(True)
+        self.stop_btn.setVisible(False)
+        self.stop_btn.setEnabled(True)
+        self.add_folder_btn.setEnabled(True)
+        self.remove_folder_btn.setEnabled(True)
+        self.algo_combo.setEnabled(True)
+        self.progress_bar.setVisible(False)
+        self.progress_label.setText(f"エラー: {error}")
+        QMessageBox.critical(self, "エラー", f"スキャン中にエラーが発生しました:\n{error}")
+    
+    @Slot(int)
+    def _on_delete_count_changed(self, count: int):
+        """削除対象数変更"""
+        self.delete_btn.setEnabled(count > 0)
+        if count > 0:
+            self.delete_count_label.setText(f"🗑️ {count}枚を削除対象に選択中")
+        else:
+            self.delete_count_label.setText("")
+    
+    @Slot()
+    def _on_delete_files(self):
+        """ファイル削除（ゴミ箱へ移動）"""
+        files = self.image_grid.get_all_files_to_delete()
+        if not files:
+            return
+        
+        reply = QMessageBox.question(
+            self, "削除確認",
+            f"{len(files)}枚の画像をゴミ箱に移動します。\n"
+            "続行しますか？",
+            QMessageBox.Yes | QMessageBox.No, QMessageBox.No
+        )
+        
+        if reply != QMessageBox.Yes:
+            return
+        
+        # send2trashをインポート
+        try:
+            from send2trash import send2trash
+        except ImportError:
+            # send2trashがない場合は従来のos.removeを使用
+            reply = QMessageBox.warning(
+                self, "警告",
+                "send2trashがインストールされていません。\n"
+                "ファイルを完全に削除しますか？\n"
+                "（pip install Send2Trash でインストール推奨）",
+                QMessageBox.Yes | QMessageBox.No, QMessageBox.No
+            )
+            if reply != QMessageBox.Yes:
+                return
+            send2trash = None
+        
+        deleted, errors = 0, []
+        for path in files:
+            try:
+                if send2trash:
+                    send2trash(str(path))
+                else:
+                    os.remove(path)
+                deleted += 1
+            except Exception as e:
+                errors.append(f"{path.name}: {e}")
+        
+        if send2trash:
+            msg = f"{deleted}枚の画像をゴミ箱に移動しました。"
+        else:
+            msg = f"{deleted}枚の画像を削除しました。"
+        
+        if errors:
+            msg += f"\n\n{len(errors)}件のエラー:\n" + "\n".join(errors[:5])
+            if len(errors) > 5:
+                msg += f"\n... 他{len(errors)-5}件"
+        
+        QMessageBox.information(self, "完了", msg)
+        
+        # 再スキャン
+        if self.current_folders:
+            self._on_start_scan()
+    
+    @Slot()
+    def _on_smart_select_all(self):
+        """全グループでスマート自動選択を実行"""
+        self.image_grid.smart_select_all()
+        self.progress_label.setText("⚡ スマート選択を適用しました")
