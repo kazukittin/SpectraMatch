@@ -17,7 +17,7 @@ from enum import Enum
 from pathlib import Path
 from queue import Empty, Queue
 from threading import Event, Thread
-from typing import Callable, List, Optional, Set, Dict
+from typing import Callable, List, Optional, Set, Dict, Tuple
 import numpy as np
 
 from PySide6.QtCore import QObject, Signal
@@ -51,6 +51,7 @@ class ScanResult:
     groups: List[SimilarityGroup] = field(default_factory=list)
     errors: List[str] = field(default_factory=list)
     mode: ScanMode = ScanMode.PHASH
+    all_images: List['ImageInfo'] = field(default_factory=list)  # 全画像リスト（ブレ画像表示用）
 
 
 class ImageScanner(QObject):
@@ -308,32 +309,70 @@ class ImageScanner(QObject):
             batch_records: List[Dict] = []
             BATCH_SIZE = 100
             
-            # AIモードはシングルスレッド、pHashは並列
+            # AIモードはバッチ処理（高速化）、pHashは並列
             if mode == ScanMode.AI_CLIP:
-                for path in files_to_process:
+                CLIP_BATCH_SIZE = 32  # RTX4060に最適化
+                
+                for batch_start in range(0, len(files_to_process), CLIP_BATCH_SIZE):
                     if self._stop_event.is_set():
                         break
                     
-                    rec = process_func(path)
-                    if rec:
-                        batch_records.append(rec)
-                        result.processed_files += 1
-                    else:
-                        result.skipped_files += 1
-                        result.errors.append(f"スキップ: {path}")
+                    batch_end = min(batch_start + CLIP_BATCH_SIZE, len(files_to_process))
+                    batch_paths = files_to_process[batch_start:batch_end]
                     
-                    processed += 1
+                    # ファイル情報を先に取得
+                    file_infos = []
+                    for path in batch_paths:
+                        try:
+                            stat = path.stat()
+                            sharpness, width, height = self.hasher.compute_sharpness(path)
+                            file_infos.append({
+                                'path': path,
+                                'file_size': stat.st_size,
+                                'last_modified': stat.st_mtime,
+                                'width': width,
+                                'height': height,
+                                'blur_score': sharpness
+                            })
+                        except Exception as e:
+                            logger.error(f"ファイル情報取得エラー: {path} - {e}")
+                            file_infos.append(None)
+                    
+                    # バッチでCLIP埋め込みを抽出
+                    valid_paths = [info['path'] for info in file_infos if info is not None]
+                    embeddings = self.clip_engine.extract_embeddings_batch(valid_paths, batch_size=CLIP_BATCH_SIZE)
+                    
+                    # 結果をマージ
+                    embed_idx = 0
+                    for i, info in enumerate(file_infos):
+                        if info is None:
+                            result.skipped_files += 1
+                            result.errors.append(f"スキップ: {batch_paths[i]}")
+                        else:
+                            embedding = embeddings[embed_idx] if embed_idx < len(embeddings) else None
+                            embed_idx += 1
+                            
+                            if embedding is not None:
+                                info['embedding'] = embedding
+                                info['phash_int'] = 0
+                                batch_records.append(info)
+                                result.processed_files += 1
+                            else:
+                                result.skipped_files += 1
+                                result.errors.append(f"CLIP処理失敗: {info['path']}")
+                        
+                        processed += 1
                     
                     # バッチでDBに保存
                     if len(batch_records) >= BATCH_SIZE:
                         self.db.batch_upsert(batch_records)
                         batch_records = []
                     
-                    if processed % 5 == 0 or processed == result.total_files:
-                        self.progress_updated.emit(
-                            processed, result.total_files,
-                            f"{mode_name}中... ({processed}/{result.total_files})"
-                        )
+                    # 進捗更新（バッチ単位で更新）
+                    self.progress_updated.emit(
+                        processed, result.total_files,
+                        f"{mode_name}中... ({processed}/{result.total_files})"
+                    )
             else:
                 with ThreadPoolExecutor(max_workers=self.max_workers) as executor:
                     future_to_path = {
@@ -396,6 +435,20 @@ class ImageScanner(QObject):
                 result.total_files,
                 f"完了! {len(result.groups)}個の類似グループを検出"
             )
+            
+            # 全画像情報を取得（ブレ画像表示用）
+            all_image_data = self.db.get_all_images()
+            result.all_images = []
+            for img_data in all_image_data:
+                info = ImageInfo(
+                    path=Path(img_data['path']),
+                    file_size=img_data.get('file_size', 0),
+                    width=img_data.get('width', 0),
+                    height=img_data.get('height', 0),
+                    phash_int=img_data.get('phash_int', 0),
+                    sharpness_score=img_data.get('blur_score', 0)
+                )
+                result.all_images.append(info)
             
         except Exception as e:
             error_msg = f"スキャンエラー: {e}"
@@ -543,7 +596,7 @@ class ImageScanner(QObject):
         return self._find_groups_clip_numpy(clip_threshold)
     
     def _find_groups_clip_numpy(self, threshold: float) -> List[SimilarityGroup]:
-        """NumPyによるCLIPグループ化（フォールバック）"""
+        """NumPyによるCLIPグループ化（連鎖防止版）"""
         clip_data = self.db.get_all_embeddings()
         if len(clip_data) < 2:
             return []
@@ -557,42 +610,74 @@ class ImageScanner(QObject):
         similarity_matrix = embeddings @ embeddings.T
         similarity_matrix = (similarity_matrix + 1.0) / 2.0
         
-        similar_pairs = np.argwhere(
-            (similarity_matrix >= threshold) & 
-            (np.triu(np.ones((n, n), dtype=bool), k=1))
-        )
+        # 各画像の直接類似画像を収集
+        direct_neighbors: Dict[int, List[Tuple[int, float]]] = {}
+        for i in range(n):
+            neighbors = []
+            for j in range(n):
+                if i != j and similarity_matrix[i, j] >= threshold:
+                    neighbors.append((j, float(similarity_matrix[i, j])))
+            if neighbors:
+                # 類似度順でソート
+                neighbors.sort(key=lambda x: -x[1])
+                direct_neighbors[i] = neighbors[:20]  # 上位20件に制限
         
-        if len(similar_pairs) == 0:
+        if not direct_neighbors:
             return []
         
-        # Union-Find
-        parent = list(range(n))
-        def find(x):
-            if parent[x] != x:
-                parent[x] = find(parent[x])
-            return parent[x]
-        def union(x, y):
-            px, py = find(x), find(y)
-            if px != py:
-                parent[py] = px
+        # 相互類似チェック: AがBに類似 かつ BがAに類似 の場合のみ
+        mutual_pairs: set = set()
+        for i, neighbors in direct_neighbors.items():
+            for j, sim in neighbors:
+                if j in direct_neighbors:
+                    j_neighbors = {n[0] for n in direct_neighbors[j]}
+                    if i in j_neighbors:
+                        pair = (min(i, j), max(i, j))
+                        mutual_pairs.add(pair)
         
-        for i, j in similar_pairs:
-            union(i, j)
+        if not mutual_pairs:
+            return []
         
-        groups_dict: Dict[int, List[int]] = {}
-        for i in range(n):
-            root = find(i)
-            if root not in groups_dict:
-                groups_dict[root] = []
-            groups_dict[root].append(i)
-        
+        # 貪欲法でグループを構築（完全連結）
+        used = set()
         result = []
         group_id = 0
-        for members in groups_dict.values():
-            if len(members) >= 2:
+        
+        candidates = sorted(direct_neighbors.keys(), 
+                           key=lambda x: len(direct_neighbors[x]), 
+                           reverse=True)
+        
+        for center in candidates:
+            if center in used:
+                continue
+            
+            group_members = [center]
+            
+            for neighbor, sim in direct_neighbors.get(center, []):
+                if neighbor in used:
+                    continue
+                
+                pair = (min(center, neighbor), max(center, neighbor))
+                if pair not in mutual_pairs:
+                    continue
+                
+                # グループ内の全員と類似しているかチェック
+                is_similar_to_all = True
+                for member in group_members:
+                    if member == center:
+                        continue
+                    member_pair = (min(member, neighbor), max(member, neighbor))
+                    if member_pair not in mutual_pairs:
+                        is_similar_to_all = False
+                        break
+                
+                if is_similar_to_all:
+                    group_members.append(neighbor)
+            
+            if len(group_members) >= 2:
                 group_id += 1
                 group_images = []
-                for m in members:
+                for m in group_members:
                     img_data = self.db.get_image_by_path(paths[m])
                     if img_data:
                         embedding = None
@@ -616,6 +701,40 @@ class ImageScanner(QObject):
                         min_distance=0,
                         max_distance=int((1 - threshold) * 100)
                     ))
+                    for m in group_members:
+                        used.add(m)
+        
+        # 残りの相互類似ペアを2画像グループとして追加
+        for i, j in mutual_pairs:
+            if i not in used and j not in used:
+                group_id += 1
+                group_images = []
+                for m in [i, j]:
+                    img_data = self.db.get_image_by_path(paths[m])
+                    if img_data:
+                        embedding = None
+                        if img_data.get('embedding'):
+                            embedding = pickle.loads(img_data['embedding'])
+                        info = ImageInfo(
+                            path=Path(img_data['path']),
+                            file_size=img_data.get('file_size', 0),
+                            width=img_data.get('width', 0),
+                            height=img_data.get('height', 0),
+                            sharpness_score=img_data.get('blur_score', 0),
+                            clip_embedding=embedding
+                        )
+                        group_images.append(info)
+                
+                if len(group_images) >= 2:
+                    result.append(SimilarityGroup(
+                        group_id=group_id,
+                        images=group_images,
+                        is_exact_match=False,
+                        min_distance=0,
+                        max_distance=int((1 - threshold) * 100)
+                    ))
+                    used.add(i)
+                    used.add(j)
         
         return result
     

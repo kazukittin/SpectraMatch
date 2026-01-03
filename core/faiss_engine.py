@@ -329,7 +329,12 @@ def find_similar_groups_faiss_clip(
     threshold: float = 0.85
 ) -> List[List[Tuple[int, str, float]]]:
     """
-    Faissを使用したCLIP類似グループ検出
+    Faissを使用したCLIP類似グループ検出（連鎖防止版）
+    
+    スター型グループ化:
+    - 各画像に対して直接類似している画像のみをグループ化
+    - A→B→Cのような連鎖的マージを防止
+    - 各グループは「中心画像」と「それに直接類似する画像」で構成
     
     Args:
         clip_data: [(id, path, embedding), ...] のリスト
@@ -354,45 +359,105 @@ def find_similar_groups_faiss_clip(
     index = _faiss.IndexFlatIP(dim)
     index.add(embeddings)
     
-    # k近傍検索
-    k = min(100, n)
+    # k近傍検索（自分自身を含むので+1）
+    # 各画像につき最大20件の類似画像を検索
+    k = min(21, n)
     similarities, indices = index.search(embeddings, k)
     
-    # Union-Find
-    parent = list(range(n))
+    logger.info(f"[CLIP] 検索完了: n={n}, k={k}, threshold={threshold}")
     
-    def find(x):
-        if parent[x] != x:
-            parent[x] = find(parent[x])
-        return parent[x]
-    
-    def union(x, y):
-        px, py = find(x), find(y)
-        if px != py:
-            parent[py] = px
-    
-    # 閾値以上のペアをUnion
+    # 各画像の直接類似画像を収集
+    direct_neighbors: Dict[int, List[Tuple[int, float]]] = {}
     for i in range(n):
-        for j_idx in range(k):
+        neighbors = []
+        for j_idx in range(1, k):  # 0番目は自分自身なのでスキップ
             j = indices[i, j_idx]
             sim = similarities[i, j_idx]
-            if j > i and sim >= threshold:
-                union(i, j)
+            if j >= 0 and j != i and sim >= threshold:
+                neighbors.append((j, float(sim)))
+        if neighbors:
+            direct_neighbors[i] = neighbors
     
-    # グループを構築
-    groups_dict: Dict[int, List[int]] = {}
-    for i in range(n):
-        root = find(i)
-        if root not in groups_dict:
-            groups_dict[root] = []
-        groups_dict[root].append(i)
+    logger.info(f"[CLIP] 類似画像を持つ画像数: {len(direct_neighbors)}")
     
-    # 2個以上のグループのみ返す
+    if not direct_neighbors:
+        return []
+    
+    # 相互類似チェック: AがBに類似 かつ BがAに類似 の場合のみグループ化
+    # これにより誤検出を大幅に減らす
+    mutual_pairs: set = set()
+    for i, neighbors in direct_neighbors.items():
+        for j, sim in neighbors:
+            # 相互に類似している場合のみ
+            if j in direct_neighbors:
+                j_neighbors = {n[0] for n in direct_neighbors[j]}
+                if i in j_neighbors:
+                    pair = (min(i, j), max(i, j))
+                    mutual_pairs.add(pair)
+    
+    logger.info(f"[CLIP] 相互類似ペア数: {len(mutual_pairs)}")
+    
+    if not mutual_pairs:
+        return []
+    
+    # 貪欲法でグループを構築（連鎖を防ぐ）
+    # 1. まだどのグループにも属していない画像から開始
+    # 2. その画像と相互類似している画像をグループに追加
+    # 3. ただし、グループ内の全画像と類似している場合のみ追加（完全連結）
+    
+    used = set()
     result = []
-    for members in groups_dict.values():
-        if len(members) >= 2:
-            # グループ内の平均類似度を計算
-            group = [(ids[m], paths[m]) for m in members]
+    
+    # 類似画像が多い順にソート（より良いグループ中心を選ぶ）
+    candidates = sorted(direct_neighbors.keys(), 
+                       key=lambda x: len(direct_neighbors[x]), 
+                       reverse=True)
+    
+    for center in candidates:
+        if center in used:
+            continue
+        
+        # 中心画像と相互類似している画像を収集
+        group_members = [center]
+        center_neighbors = {n[0] for n in direct_neighbors.get(center, [])}
+        
+        for neighbor, sim in direct_neighbors.get(center, []):
+            if neighbor in used:
+                continue
+            
+            # 相互類似チェック
+            pair = (min(center, neighbor), max(center, neighbor))
+            if pair not in mutual_pairs:
+                continue
+            
+            # グループ内の全員と類似しているかチェック（完全連結）
+            is_similar_to_all = True
+            for member in group_members:
+                if member == center:
+                    continue  # 中心とは既に類似確認済み
+                member_pair = (min(member, neighbor), max(member, neighbor))
+                if member_pair not in mutual_pairs:
+                    is_similar_to_all = False
+                    break
+            
+            if is_similar_to_all:
+                group_members.append(neighbor)
+        
+        # 2つ以上の画像があればグループとして追加
+        if len(group_members) >= 2:
+            group = [(ids[m], paths[m]) for m in group_members]
             result.append(group)
+            for m in group_members:
+                used.add(m)
+    
+    # 残りの相互類似ペアを2画像グループとして追加
+    for i, j in mutual_pairs:
+        if i not in used and j not in used:
+            group = [(ids[i], paths[i]), (ids[j], paths[j])]
+            result.append(group)
+            used.add(i)
+            used.add(j)
+    
+    logger.info(f"[CLIP] 検出グループ数: {len(result)}")
     
     return result

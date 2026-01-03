@@ -324,6 +324,18 @@ class ImageDatabase:
             yield batch
             offset += batch_size
     
+    def get_all_images(self) -> List[Dict]:
+        """
+        全画像情報を取得
+        
+        Returns:
+            画像情報の辞書リスト
+        """
+        cursor = self.conn.cursor()
+        cursor.execute("SELECT * FROM images ORDER BY blur_score ASC")
+        return [dict(row) for row in cursor.fetchall()]
+
+    
     def count_images(self) -> int:
         """画像総数を取得"""
         cursor = self.conn.cursor()

@@ -16,13 +16,13 @@ from PySide6.QtWidgets import (
     QLabel, QPushButton, QSlider, QProgressBar,
     QFileDialog, QMessageBox, QFrame, QApplication,
     QSplitter, QListWidget, QListWidgetItem, QSizePolicy,
-    QComboBox
+    QComboBox, QStackedWidget
 )
 from PySide6.QtGui import QFont
 
 from core.scanner import ImageScanner, ScanResult, ScanMode
 from core.comparator import SimilarityGroup
-from .image_grid import ImageGridWidget
+from .image_grid import ImageGridWidget, BlurredImagesGridWidget
 from .styles import DarkTheme
 
 logger = logging.getLogger(__name__)
@@ -43,6 +43,7 @@ class MainWindow(QMainWindow):
         self.scanner = ImageScanner()
         self.current_folders: List[Path] = []
         self.scan_result: ScanResult = None
+        self.current_view_mode = "similar"  # "similar" or "blurred"
         
         self._setup_ui()
         self._connect_signals()
@@ -128,44 +129,43 @@ class MainWindow(QMainWindow):
         sep2.setStyleSheet("background-color: #4a4a4a;")
         layout.addWidget(sep2)
         
-        # アルゴリズム選択セクション
+        # アルゴリズム表示セクション
         algo_section = QLabel("🧠 検出アルゴリズム")
         algo_section.setObjectName("sectionLabel")
         layout.addWidget(algo_section)
         
+        # CLIPモード表示（ドロップダウンからラベルに変更）
+        algo_label = QLabel("🤖 AI Semantic (CLIP)")
+        algo_label.setStyleSheet(
+            "background-color: #3c3c3c; border: 1px solid #4a4a4a; "
+            "border-radius: 4px; padding: 8px; font-size: 13px;"
+        )
+        layout.addWidget(algo_label)
+        
+        # 内部で使用するダミーのコンボボックス（互換性維持）
         self.algo_combo = QComboBox()
-        # CLIPのみモード (pHashは一時的に無効)
-        # self.algo_combo.addItem("🔷 pHash (高速)", ScanMode.PHASH)
         self.algo_combo.addItem("🤖 AI Semantic (CLIP)", ScanMode.AI_CLIP)
-        self.algo_combo.setStyleSheet("""
-            QComboBox {
-                background-color: #3c3c3c;
-                border: 1px solid #4a4a4a;
-                border-radius: 4px;
-                padding: 8px;
-                font-size: 13px;
-            }
-            QComboBox:hover {
-                border-color: #00ffff;
-            }
-            QComboBox::drop-down {
-                border: none;
-                width: 30px;
-            }
-            QComboBox QAbstractItemView {
-                background-color: #2b2b2b;
-                selection-background-color: #00ffff;
-                selection-color: #1e1e1e;
-            }
-        """)
-        self.algo_combo.currentIndexChanged.connect(self._on_algorithm_changed)
+        self.algo_combo.setVisible(False)
         layout.addWidget(self.algo_combo)
         
-        # アルゴリズム説明 (CLIP用)
+        # アルゴリズム説明
         self.algo_desc = QLabel("OpenAI CLIPによるセマンティック検索\n意味的類似性を捉える高精度モード")
         self.algo_desc.setStyleSheet("color: #9b59b6; font-size: 10px;")
         self.algo_desc.setWordWrap(True)
         layout.addWidget(self.algo_desc)
+        
+        # キャッシュ削除ボタン
+        self.clear_cache_btn = QPushButton("🗑️ キャッシュを削除")
+        self.clear_cache_btn.setStyleSheet(
+            "background-color: #c0392b; color: white; "
+            "font-weight: bold; padding: 8px; border-radius: 4px;"
+        )
+        self.clear_cache_btn.setToolTip(
+            "データベースに保存された画像情報を削除します\n"
+            "次回スキャン時に全ファイルを再解析します"
+        )
+        self.clear_cache_btn.clicked.connect(self._on_clear_cache)
+        layout.addWidget(self.clear_cache_btn)
         
         # 区切り線
         sep3 = QFrame()
@@ -278,11 +278,31 @@ class MainWindow(QMainWindow):
         header_layout.setContentsMargins(20, 12, 20, 12)
         header_layout.setSpacing(16)
         
-        results_title = QLabel("📊 検出結果")
-        results_title.setStyleSheet("font-size: 16px; font-weight: bold;")
-        header_layout.addWidget(results_title)
+        # 表示モード切替ボタン
+        self.view_similar_btn = QPushButton("📊 類似画像")
+        self.view_similar_btn.setStyleSheet(
+            "background-color: #00ffff; color: #1e1e1e; "
+            "font-weight: bold; padding: 8px 16px; border-radius: 4px;"
+        )
+        self.view_similar_btn.setCheckable(True)
+        self.view_similar_btn.setChecked(True)
+        self.view_similar_btn.clicked.connect(lambda: self._switch_view("similar"))
+        header_layout.addWidget(self.view_similar_btn)
         
-        # スマート自動選択ボタン（ツールバー）
+        self.view_blurred_btn = QPushButton("📷 ブレ画像")
+        self.view_blurred_btn.setStyleSheet(
+            "background-color: #4a4a4a; color: white; "
+            "font-weight: bold; padding: 8px 16px; border-radius: 4px;"
+        )
+        self.view_blurred_btn.setCheckable(True)
+        self.view_blurred_btn.setChecked(False)
+        self.view_blurred_btn.setToolTip("鮮明度スコアが低い（ブレている）画像を\n降順に表示します")
+        self.view_blurred_btn.clicked.connect(lambda: self._switch_view("blurred"))
+        header_layout.addWidget(self.view_blurred_btn)
+        
+        header_layout.addSpacing(20)
+        
+        # スマート自動選択ボタン（類似画像モード用）
         self.smart_select_btn = QPushButton("⚡ 全グループをスマート選択")
         self.smart_select_btn.setStyleSheet(
             "background-color: #9b59b6; color: white; "
@@ -296,6 +316,26 @@ class MainWindow(QMainWindow):
         self.smart_select_btn.clicked.connect(self._on_smart_select_all)
         header_layout.addWidget(self.smart_select_btn)
         
+        # ブレ画像用ボタン（ブレ画像モード時のみ表示）
+        self.select_all_blurred_btn = QPushButton("✓ 全選択")
+        self.select_all_blurred_btn.setStyleSheet(
+            "background-color: #e74c3c; color: white; "
+            "font-weight: bold; padding: 8px 16px; border-radius: 4px;"
+        )
+        self.select_all_blurred_btn.setToolTip("現在ページの全画像を削除対象に選択")
+        self.select_all_blurred_btn.setVisible(False)
+        self.select_all_blurred_btn.clicked.connect(self._on_select_all_blurred)
+        header_layout.addWidget(self.select_all_blurred_btn)
+        
+        self.clear_blurred_btn = QPushButton("✕ 選択解除")
+        self.clear_blurred_btn.setStyleSheet(
+            "background-color: #4a4a4a; color: white; "
+            "font-weight: bold; padding: 8px 16px; border-radius: 4px;"
+        )
+        self.clear_blurred_btn.setVisible(False)
+        self.clear_blurred_btn.clicked.connect(self._on_clear_blurred_selection)
+        header_layout.addWidget(self.clear_blurred_btn)
+        
         header_layout.addStretch()
         
         self.status_label = QLabel("フォルダを追加してスキャンを開始してください")
@@ -304,11 +344,86 @@ class MainWindow(QMainWindow):
         
         layout.addWidget(header)
         
-        # 結果グリッド
+        # スタックウィジェット（類似画像/ブレ画像切替）
+        self.view_stack = QStackedWidget()
+        
+        # 類似画像グリッド
         self.image_grid = ImageGridWidget()
-        layout.addWidget(self.image_grid, 1)
+        self.view_stack.addWidget(self.image_grid)
+        
+        # ブレ画像グリッド
+        self.blurred_grid = BlurredImagesGridWidget()
+        self.view_stack.addWidget(self.blurred_grid)
+        
+        layout.addWidget(self.view_stack, 1)
         
         return main_widget
+    
+    def _switch_view(self, mode: str):
+        """表示モードを切り替え"""
+        self.current_view_mode = mode
+        
+        if mode == "similar":
+            self.view_stack.setCurrentWidget(self.image_grid)
+            self.view_similar_btn.setChecked(True)
+            self.view_similar_btn.setStyleSheet(
+                "background-color: #00ffff; color: #1e1e1e; "
+                "font-weight: bold; padding: 8px 16px; border-radius: 4px;"
+            )
+            self.view_blurred_btn.setChecked(False)
+            self.view_blurred_btn.setStyleSheet(
+                "background-color: #4a4a4a; color: white; "
+                "font-weight: bold; padding: 8px 16px; border-radius: 4px;"
+            )
+            # ボタン表示切替
+            self.smart_select_btn.setVisible(True)
+            self.select_all_blurred_btn.setVisible(False)
+            self.clear_blurred_btn.setVisible(False)
+        else:  # blurred
+            self.view_stack.setCurrentWidget(self.blurred_grid)
+            self.view_blurred_btn.setChecked(True)
+            self.view_blurred_btn.setStyleSheet(
+                "background-color: #e74c3c; color: white; "
+                "font-weight: bold; padding: 8px 16px; border-radius: 4px;"
+            )
+            self.view_similar_btn.setChecked(False)
+            self.view_similar_btn.setStyleSheet(
+                "background-color: #4a4a4a; color: white; "
+                "font-weight: bold; padding: 8px 16px; border-radius: 4px;"
+            )
+            # ボタン表示切替
+            self.smart_select_btn.setVisible(False)
+            self.select_all_blurred_btn.setVisible(True)
+            self.clear_blurred_btn.setVisible(True)
+            
+            # ブレ画像を表示（スキャン結果がある場合）
+            if self.scan_result and hasattr(self.scan_result, 'all_images'):
+                self._display_blurred_images()
+    
+    def _display_blurred_images(self):
+        """ブレ画像を鮮明度昇順（ブレが酷い順）で表示"""
+        if not self.scan_result or not hasattr(self.scan_result, 'all_images'):
+            return
+        
+        # 鮮明度スコアで昇順ソート（低い=ブレている順）
+        sorted_images = sorted(
+            self.scan_result.all_images, 
+            key=lambda x: x.sharpness_score
+        )
+        
+        self.blurred_grid.set_images(sorted_images)
+        self.status_label.setText(f"📷 ブレ画像: {len(sorted_images)}枚（鮮明度昇順）")
+        self.status_label.setStyleSheet("color: #e74c3c;")
+    
+    @Slot()
+    def _on_select_all_blurred(self):
+        """ブレ画像の全選択"""
+        self.blurred_grid.select_all()
+    
+    @Slot()
+    def _on_clear_blurred_selection(self):
+        """ブレ画像の選択解除"""
+        self.blurred_grid.clear_selection()
     
     def _connect_signals(self):
         """シグナル接続"""
@@ -316,6 +431,7 @@ class MainWindow(QMainWindow):
         self.scanner.scan_completed.connect(self._on_scan_completed)
         self.scanner.scan_error.connect(self._on_scan_error)
         self.image_grid.files_to_delete_changed.connect(self._on_delete_count_changed)
+        self.blurred_grid.files_to_delete_changed.connect(self._on_delete_count_changed)
     
     @Slot()
     def _on_add_folder(self):
@@ -510,7 +626,12 @@ class MainWindow(QMainWindow):
     @Slot()
     def _on_delete_files(self):
         """ファイル削除（ゴミ箱へ移動）"""
-        files = self.image_grid.get_all_files_to_delete()
+        # 現在の表示モードに応じてファイルを取得
+        if self.current_view_mode == "blurred":
+            files = self.blurred_grid.get_all_files_to_delete()
+        else:
+            files = self.image_grid.get_all_files_to_delete()
+        
         if not files:
             return
         
@@ -572,3 +693,40 @@ class MainWindow(QMainWindow):
         """全グループでスマート自動選択を実行"""
         self.image_grid.smart_select_all()
         self.progress_label.setText("⚡ スマート選択を適用しました")
+    
+    @Slot()
+    def _on_clear_cache(self):
+        """キャッシュを削除"""
+        reply = QMessageBox.question(
+            self, "キャッシュ削除",
+            "データベースに保存された全ての画像情報を削除します。\n"
+            "次回スキャン時に全ファイルを再解析します。\n\n"
+            "続行しますか？",
+            QMessageBox.Yes | QMessageBox.No, QMessageBox.No
+        )
+        
+        if reply != QMessageBox.Yes:
+            return
+        
+        try:
+            # データベースをクリア
+            self.scanner.db.clear_all()
+            self.scanner.db.vacuum()
+            
+            # サムネイルキャッシュもクリア
+            from .image_grid import clear_thumbnail_cache
+            clear_thumbnail_cache()
+            
+            # 表示をクリア
+            self.image_grid.clear()
+            self.blurred_grid.clear()
+            self.scan_result = None
+            
+            self.status_label.setText("キャッシュを削除しました")
+            self.status_label.setStyleSheet("color: #f39c12;")
+            self.progress_label.setText("🗑️ キャッシュを削除しました。次回スキャンで全ファイルを再解析します。")
+            
+            QMessageBox.information(self, "完了", "キャッシュを削除しました。")
+            
+        except Exception as e:
+            QMessageBox.critical(self, "エラー", f"キャッシュ削除中にエラーが発生しました:\n{e}")
