@@ -586,8 +586,10 @@ class MainWindow(QMainWindow):
                 val = self.progress_bar.value() + 5
                 self.progress_bar.setValue(min(val, 90))
             elif "Installing collected packages" in line:
-                self.progress_label.setText("ライブラリをインストール中 (数分かかります)...")
+                self.progress_label.setText("📦 最終インストール中... (2〜5分ほどかかります。閉じずにお待ちください)")
+                self.progress_label.setStyleSheet("color: #f1c40f; font-weight: bold;")
                 self.progress_bar.setValue(95)
+                self.log_view.appendPlainText("\n[INFO] パッケージの展開と配置を開始しました。これには数分かかります...")
             
             logger.info(f"[Installer] {line}")
 
@@ -598,9 +600,12 @@ class MainWindow(QMainWindow):
         
         if exit_code == 0:
             self.log_view.appendPlainText("\n--- セットアップ完了 ---")
-            QMessageBox.information(self, "完了", "AIエンジンのセットアップが完了しました！\nスキャンを開始できます。")
-            self.progress_label.setText("セットアップ完了")
-            # 成功した場合は数秒後にログを隠すなどの処理も可能
+            # インストール直後にキャッシュを無効化して再認識させる
+            if is_ai_installed():
+                QMessageBox.information(self, "完了", "AIエンジンのセットアップが完了しました！\nスキャンを開始できます。")
+                self.progress_label.setText("セットアップ完了")
+            else:
+                QMessageBox.warning(self, "確認失敗", "インストールは成功しましたが、ライブラリの読み込みに失敗しました。アプリを再起動してください。")
         else:
             self.log_view.appendPlainText("\n--- セットアップ失敗 ---")
             err = self.installer_process.readAllStandardError().data().decode(errors='replace')
