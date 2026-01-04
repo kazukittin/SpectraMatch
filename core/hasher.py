@@ -254,6 +254,9 @@ class ImageHasher:
         """
         ブレ検知（鮮明度スコア）と解像度を計算
         
+        大きい画像も小さい画像も公平に比較できるよう、
+        分析用に一定サイズにリサイズしてから計算する。
+        
         Args:
             file_path: 対象画像ファイルのパス
             
@@ -275,8 +278,21 @@ class ImageHasher:
             else:
                 gray = img
             
+            # ===== 改善: 分析用に一定サイズにリサイズ =====
+            # これにより解像度に依存しないブレスコアが得られる
+            ANALYSIS_SIZE = 500  # 分析用サイズ（長辺）
+            
+            h, w = gray.shape[:2]
+            if max(h, w) > ANALYSIS_SIZE:
+                scale = ANALYSIS_SIZE / max(h, w)
+                new_w = int(w * scale)
+                new_h = int(h * scale)
+                gray_resized = cv2.resize(gray, (new_w, new_h), interpolation=cv2.INTER_AREA)
+            else:
+                gray_resized = gray
+            
             # Laplacianフィルタを適用し、分散を計算
-            laplacian = cv2.Laplacian(gray, cv2.CV_64F)
+            laplacian = cv2.Laplacian(gray_resized, cv2.CV_64F)
             sharpness = laplacian.var()
             
             return float(sharpness), width, height

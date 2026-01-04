@@ -47,10 +47,18 @@ def format_file_size(size_bytes: int) -> str:
 
 
 def get_sharpness_label(score: float) -> str:
-    """鮮明度スコアを分かりやすいラベルに変換"""
-    if score < 100:
+    """
+    鮮明度スコアを分かりやすいラベルに変換
+    
+    スコアは500px正規化されたLaplacian分散値
+    - 低い値: ブレている、ぼやけている
+    - 高い値: エッジがくっきり、鮮明
+    """
+    if score < 50:
+        return "かなりブレ"
+    elif score < 100:
         return "ブレ"
-    elif score < 300:
+    elif score < 200:
         return "やや不鮮明"
     elif score < 500:
         return "普通"
@@ -213,14 +221,16 @@ class ImageCard(QFrame):
         sharpness = self.image_info.sharpness_score
         sharpness_desc = get_sharpness_label(sharpness)
         
-        if sharpness < 100:
-            color = "#e74c3c"
-        elif sharpness < 300:
-            color = "#f39c12"
+        if sharpness < 50:
+            color = "#e74c3c"  # かなりブレ - 赤
+        elif sharpness < 100:
+            color = "#e67e22"  # ブレ - オレンジ
+        elif sharpness < 200:
+            color = "#f39c12"  # やや不鮮明 - 黄
         elif sharpness < 500:
-            color = "#b0b0b0"
+            color = "#b0b0b0"  # 普通 - グレー
         else:
-            color = "#2ecc71"
+            color = "#2ecc71"  # 鮮明 - 緑
         
         self.sharpness_label = QLabel(f"🔍 {sharpness:.0f} ({sharpness_desc})")
         self.sharpness_label.setAlignment(Qt.AlignCenter)
@@ -659,14 +669,16 @@ class BlurredImageCard(QFrame):
         sharpness = self.image_info.sharpness_score
         sharpness_desc = get_sharpness_label(sharpness)
         
-        if sharpness < 100:
-            color = "#e74c3c"
-        elif sharpness < 300:
-            color = "#f39c12"
+        if sharpness < 50:
+            color = "#e74c3c"  # かなりブレ - 赤
+        elif sharpness < 100:
+            color = "#e67e22"  # ブレ - オレンジ
+        elif sharpness < 200:
+            color = "#f39c12"  # やや不鮮明 - 黄
         elif sharpness < 500:
-            color = "#b0b0b0"
+            color = "#b0b0b0"  # 普通 - グレー
         else:
-            color = "#2ecc71"
+            color = "#2ecc71"  # 鮮明 - 緑
         
         self.sharpness_label = QLabel(f"🔍 {sharpness:.0f}\n{sharpness_desc}")
         self.sharpness_label.setAlignment(Qt.AlignCenter)
