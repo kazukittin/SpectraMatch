@@ -625,7 +625,7 @@ class MainWindow(QMainWindow):
     
     @Slot()
     def _on_delete_files(self):
-        """ファイル削除（ゴミ箱へ移動）"""
+        """ファイル削除（ゴミ箱へ移動）+ 即時UI更新"""
         # 現在の表示モードに応じてファイルを取得
         if self.current_view_mode == "blurred":
             files = self.blurred_grid.get_all_files_to_delete()
@@ -661,32 +661,76 @@ class MainWindow(QMainWindow):
                 return
             send2trash = None
         
-        deleted, errors = 0, []
+        deleted_files = []
+        errors = []
         for path in files:
             try:
                 if send2trash:
                     send2trash(str(path))
                 else:
                     os.remove(path)
-                deleted += 1
+                deleted_files.append(path)
             except Exception as e:
                 errors.append(f"{path.name}: {e}")
         
+        # ===== 即時UI更新 =====
+        removed_groups = 0
+        if deleted_files:
+            # 両方のグリッドから削除されたファイルを除去
+            removed_groups = self.image_grid.remove_deleted_files(deleted_files)
+            self.blurred_grid.remove_deleted_files(deleted_files)
+            
+            # scan_resultも更新（内部データの整合性維持）
+            if self.scan_result:
+                deleted_paths_set = {str(p) for p in deleted_files}
+                
+                # all_imagesから削除
+                if hasattr(self.scan_result, 'all_images'):
+                    self.scan_result.all_images = [
+                        img for img in self.scan_result.all_images
+                        if str(img.path) not in deleted_paths_set
+                    ]
+                
+                # groupsも更新
+                groups_to_keep = []
+                for group in self.scan_result.groups:
+                    group.images = [
+                        img for img in group.images
+                        if str(img.path) not in deleted_paths_set
+                    ]
+                    if len(group.images) >= 2:
+                        groups_to_keep.append(group)
+                self.scan_result.groups = groups_to_keep
+            
+            # ステータス更新
+            if self.scan_result and self.scan_result.groups:
+                total_images = sum(g.count for g in self.scan_result.groups)
+                self.status_label.setText(
+                    f"✅ {len(self.scan_result.groups)}グループ / {total_images}枚"
+                )
+            elif self.scan_result:
+                self.status_label.setText("類似画像なし")
+            
+            # 削除対象カウントをリセット
+            self.delete_count_label.setText("")
+            self.delete_btn.setEnabled(False)
+        
+        # 結果メッセージ
         if send2trash:
-            msg = f"{deleted}枚の画像をゴミ箱に移動しました。"
+            msg = f"{len(deleted_files)}枚の画像をゴミ箱に移動しました。"
         else:
-            msg = f"{deleted}枚の画像を削除しました。"
+            msg = f"{len(deleted_files)}枚の画像を削除しました。"
+        
+        if removed_groups > 0:
+            msg += f"\n（{removed_groups}グループが1枚以下になり削除されました）"
         
         if errors:
             msg += f"\n\n{len(errors)}件のエラー:\n" + "\n".join(errors[:5])
             if len(errors) > 5:
                 msg += f"\n... 他{len(errors)-5}件"
         
+        self.progress_label.setText(f"🗑️ {len(deleted_files)}枚を削除しました")
         QMessageBox.information(self, "完了", msg)
-        
-        # 再スキャン
-        if self.current_folders:
-            self._on_start_scan()
     
     @Slot()
     def _on_smart_select_all(self):

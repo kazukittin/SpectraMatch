@@ -271,7 +271,8 @@ class ImageCard(QFrame):
             self.thumbnail_label.setText("読込失敗")
     
     def _on_checkbox_changed(self, state):
-        self.is_marked_delete = (state == Qt.Checked)
+        # PySide6のstateChangedは整数を送信 (Checked=2, Unchecked=0)
+        self.is_marked_delete = (state == Qt.CheckState.Checked.value)
         self._update_style()
         self.selection_changed.emit(self.image_info, self.is_marked_delete)
     
@@ -609,6 +610,51 @@ class ImageGridWidget(QScrollArea):
         for widget in self.group_widgets:
             files.extend(widget.get_files_to_delete())
         return files
+    
+    def remove_deleted_files(self, deleted_paths: List[Path]) -> int:
+        """
+        削除されたファイルをUIから即時除去
+        
+        Args:
+            deleted_paths: 削除されたファイルパスのリスト
+            
+        Returns:
+            削除されたグループ数
+        """
+        deleted_paths_set = {str(p) for p in deleted_paths}
+        removed_groups = 0
+        
+        # all_groupsから削除されたファイルを除去
+        groups_to_remove = []
+        for group in self.all_groups:
+            # グループ内の画像から削除されたものを除去
+            group.images = [
+                img for img in group.images 
+                if str(img.path) not in deleted_paths_set
+            ]
+            # 1枚以下になったグループは削除対象
+            if len(group.images) <= 1:
+                groups_to_remove.append(group)
+        
+        # グループを削除
+        for group in groups_to_remove:
+            self.all_groups.remove(group)
+            removed_groups += 1
+        
+        # ページ数を再計算
+        if self.all_groups:
+            self.total_pages = (len(self.all_groups) + self.GROUPS_PER_PAGE - 1) // self.GROUPS_PER_PAGE
+            # 現在ページが範囲外になった場合は調整
+            if self.current_page >= self.total_pages:
+                self.current_page = max(0, self.total_pages - 1)
+            # 現在ページを再表示
+            self._display_current_page()
+        else:
+            self.clear()
+            self.empty_label.setText("類似画像はありません")
+            self.empty_label.setVisible(True)
+        
+        return removed_groups
 
 
 class BlurredImageCard(QFrame):
@@ -716,7 +762,8 @@ class BlurredImageCard(QFrame):
             self.thumbnail_label.setText("読込失敗")
     
     def _on_checkbox_changed(self, state):
-        self.is_marked_delete = (state == Qt.Checked)
+        # PySide6のstateChangedは整数を送信 (Checked=2, Unchecked=0)
+        self.is_marked_delete = (state == Qt.CheckState.Checked.value)
         self._update_style()
         self.selection_changed.emit(self.image_info, self.is_marked_delete)
     
@@ -939,3 +986,31 @@ class BlurredImagesGridWidget(QScrollArea):
     def get_all_files_to_delete(self) -> List[Path]:
         """削除対象ファイルを取得"""
         return [card.image_info.path for card in self.cards if card.is_marked_delete]
+    
+    def remove_deleted_files(self, deleted_paths: List[Path]):
+        """
+        削除されたファイルをUIから即時除去
+        
+        Args:
+            deleted_paths: 削除されたファイルパスのリスト
+        """
+        deleted_paths_set = {str(p) for p in deleted_paths}
+        
+        # all_imagesから削除されたファイルを除去
+        self.all_images = [
+            img for img in self.all_images 
+            if str(img.path) not in deleted_paths_set
+        ]
+        
+        # ページ数を再計算
+        if self.all_images:
+            self.total_pages = (len(self.all_images) + self.IMAGES_PER_PAGE - 1) // self.IMAGES_PER_PAGE
+            # 現在ページが範囲外になった場合は調整
+            if self.current_page >= self.total_pages:
+                self.current_page = max(0, self.total_pages - 1)
+            # 現在ページを再表示
+            self._display_current_page()
+        else:
+            self.clear()
+            self.empty_label.setText("ブレ画像はありません")
+            self.empty_label.setVisible(True)
