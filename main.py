@@ -27,7 +27,7 @@ def setup_logging(debug: bool = False):
     log_file = log_dir / "app.log"
     
     log_format = "%(asctime)s - %(name)s - %(levelname)s - %(message)s"
-    level = logging.DEBUG
+    level = logging.DEBUG if debug else logging.INFO
     logging.basicConfig(
         level=level,
         format=log_format,

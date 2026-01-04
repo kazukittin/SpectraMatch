@@ -8,6 +8,7 @@ project_root = os.path.abspath('.')
 # 1. データの定義（アイコン等のみ。torch/transformersは除外）
 datas = [
     (os.path.join(project_root, 'icon'), 'icon'),
+    (os.path.join(project_root, 'core', 'clip_worker.py'), 'core'),
 ]
 
 # 2. 隠しインポート（GUIや基本機能のみ）

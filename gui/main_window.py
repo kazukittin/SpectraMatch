@@ -22,7 +22,7 @@ from PySide6.QtGui import QFont
 
 from core.scanner import ImageScanner, ScanResult, ScanMode
 from core.comparator import SimilarityGroup
-from core.clip_engine import is_ai_installed, get_install_command
+from core.clip_engine import is_ai_installed, is_ai_installed_on_disk, get_install_command
 from .image_grid import ImageGridWidget, BlurredImagesGridWidget
 from .styles import DarkTheme
 
@@ -600,12 +600,22 @@ class MainWindow(QMainWindow):
         
         if exit_code == 0:
             self.log_view.appendPlainText("\n--- セットアップ完了 ---")
-            # インストール直後にキャッシュを無効化して再認識させる
-            if is_ai_installed():
-                QMessageBox.information(self, "完了", "AIエンジンのセットアップが完了しました！\nスキャンを開始できます。")
-                self.progress_label.setText("セットアップ完了")
+            # インストール直後はファイルシステムベースでチェック（インポートは再起動後に有効化）
+            if is_ai_installed_on_disk():
+                self.progress_label.setText("セットアップ完了 - 再起動が必要です")
+                self.progress_bar.setValue(100)
+                QMessageBox.information(
+                    self, "セットアップ完了",
+                    "AIエンジンのインストールが完了しました！\n\n"
+                    "新しいライブラリを読み込むため、アプリを再起動してください。\n"
+                    "再起動後、スキャンを開始できます。"
+                )
             else:
-                QMessageBox.warning(self, "確認失敗", "インストールは成功しましたが、ライブラリの読み込みに失敗しました。アプリを再起動してください。")
+                QMessageBox.warning(
+                    self, "確認失敗",
+                    "インストールは完了しましたが、一部ファイルが見つかりません。\n"
+                    "アプリを再起動してから再度お試しください。"
+                )
         else:
             self.log_view.appendPlainText("\n--- セットアップ失敗 ---")
             err = self.installer_process.readAllStandardError().data().decode(errors='replace')
