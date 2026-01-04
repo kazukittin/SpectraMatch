@@ -10,18 +10,19 @@ import logging
 from pathlib import Path
 from typing import List
 
-from PySide6.QtCore import Qt, Slot
+from PySide6.QtCore import Qt, Slot, QProcess
 from PySide6.QtWidgets import (
     QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
     QLabel, QPushButton, QSlider, QProgressBar,
     QFileDialog, QMessageBox, QFrame, QApplication,
     QSplitter, QListWidget, QListWidgetItem, QSizePolicy,
-    QComboBox, QStackedWidget
+    QComboBox, QStackedWidget, QPlainTextEdit, QMenu
 )
 from PySide6.QtGui import QFont
 
 from core.scanner import ImageScanner, ScanResult, ScanMode
 from core.comparator import SimilarityGroup
+from core.clip_engine import is_ai_installed, get_install_command
 from .image_grid import ImageGridWidget, BlurredImagesGridWidget
 from .styles import DarkTheme
 
@@ -236,11 +237,24 @@ class MainWindow(QMainWindow):
         self.progress_bar.setVisible(False)
         self.progress_bar.setTextVisible(False)
         layout.addWidget(self.progress_bar)
-        
-        self.progress_label = QLabel("")
-        self.progress_label.setStyleSheet("color: #b0b0b0; font-size: 11px;")
-        self.progress_label.setWordWrap(True)
+        # 進捗ラベル
+        self.progress_label = QLabel("準備完了")
+        self.progress_label.setStyleSheet("color: #95a5a6; font-size: 11px;")
         layout.addWidget(self.progress_label)
+        
+        # ログ表示エリア (普段は非表示)
+        self.log_view = QPlainTextEdit()
+        self.log_view.setReadOnly(True)
+        self.log_view.setMaximumHeight(150)
+        self.log_view.setStyleSheet("""
+            background-color: #1a1a1a;
+            color: #2ecc71;
+            font-family: 'Consolas', monospace;
+            font-size: 10px;
+            border: 1px solid #333;
+        """)
+        self.log_view.setVisible(False)
+        layout.addWidget(self.log_view)
         
         layout.addStretch()
         
@@ -463,15 +477,15 @@ class MainWindow(QMainWindow):
     @Slot(int)
     def _on_threshold_changed(self, value: int):
         """閾値変更"""
-        self.threshold_value_label.setText(str(value))
+        self.threshold_value_label.setText(f"{value}%")
         
-        if value <= 3:
+        if value >= 95:
             desc = "厳密 (ほぼ同一画像のみ)"
-        elif value <= 6:
+        elif value >= 90:
             desc = "やや厳密 (高い類似度)"
-        elif value <= 10:
+        elif value >= 80:
             desc = "標準 (同一画像の異なるバージョン)"
-        elif value <= 15:
+        elif value >= 70:
             desc = "緩い (類似した構図)"
         else:
             desc = "非常に緩い (要注意)"
@@ -480,58 +494,124 @@ class MainWindow(QMainWindow):
     
     @Slot(int)
     def _on_algorithm_changed(self, index: int):
-        """アルゴリズム変更時"""
-        mode = self.algo_combo.currentData()
-        
-        if mode == ScanMode.AI_CLIP:
-            # AIモード
-            self.algo_desc.setText(
-                "OpenAI CLIPによるセマンティック検索\n"
-                "意味的類似性を捉える高精度モード"
-            )
-            self.threshold_section.setText("🎚️ 類似度閾値 (類似度%)")
-            
-            # スライダーをパーセンテージに変更
-            self.threshold_slider.blockSignals(True)
-            self.threshold_slider.setRange(50, 99)
-            self.threshold_slider.setValue(85)
-            self.threshold_slider.blockSignals(False)
-            self.threshold_value_label.setText("85%")
-            self.threshold_desc.setText("標準 (85%以上を類似とみなす)")
-            
-            # CLIP利用可能か確認
-            if not self.scanner.is_clip_available():
-                self.algo_desc.setText(
-                    "⚠️ CLIPが利用できません\n"
-                    "pip install torch transformers\n"
-                    "を実行してください"
-                )
-                self.algo_desc.setStyleSheet("color: #e74c3c; font-size: 10px;")
-            else:
-                self.algo_desc.setStyleSheet("color: #9b59b6; font-size: 10px;")
-        else:
-            # pHashモード
-            self.algo_desc.setText(
-                "DCTベースのPerceptual Hash\n"
-                "高速で軽量、リサイズ・圧縮に強い"
-            )
-            self.algo_desc.setStyleSheet("color: #808080; font-size: 10px;")
-            self.threshold_section.setText("🎚️ 類似度閾値 (ハミング距離)")
-            
-            # スライダーをハミング距離に変更
-            self.threshold_slider.blockSignals(True)
-            self.threshold_slider.setRange(0, 20)
-            self.threshold_slider.setValue(10)
-            self.threshold_slider.blockSignals(False)
-            self.threshold_value_label.setText("10")
-            self.threshold_desc.setText("標準 (同一画像の異なるバージョン)")
+        """アルゴリズム変更時（現在はCLIPのみ）"""
+        pass
     
     @Slot()
     def _on_start_scan(self):
         """スキャン開始"""
         if not self.current_folders:
             return
+            
+        if not is_ai_installed():
+            reply = QMessageBox.question(
+                self, "AIエンジン未検出",
+                "AIスキャンに必要なコンポーネント(約2GB)がインストールされていません。\n"
+                "セットアップを開始しますか？（完了まで数分かかります）",
+                QMessageBox.Yes | QMessageBox.No
+            )
+            if reply == QMessageBox.Yes:
+                self._install_ai_engine()
+            return
+            
+        self._on_start_scan_actual()
         
+    def _install_ai_engine(self):
+        """AIエンジンのセットアップ (QProcess版)"""
+        self.progress_bar.setVisible(True)
+        self.progress_bar.setRange(0, 100)
+        self.progress_bar.setValue(0)
+        self.progress_label.setText("AI環境を準備中...")
+        self.scan_btn.setEnabled(False)
+        self.log_view.clear()
+        self.log_view.setVisible(True)
+        self.log_view.appendPlainText("--- AI環境セットアップ開始 ---")
+        
+        self.installer_process = QProcess(self)
+        self.installer_process.setProcessChannelMode(QProcess.MergedChannels)
+        
+        # エラー発生時のハンドラ
+        self.installer_process.errorOccurred.connect(self._on_installer_error)
+        self.installer_process.readyReadStandardOutput.connect(self._on_installer_output)
+        self.installer_process.finished.connect(self._on_installer_finished)
+        
+        cmd = get_install_command()
+        self.log_view.appendPlainText(f"実行コマンド: {' '.join(cmd)}")
+        
+        # Windowsでウィンドウを表示しない設定
+        # CREATE_NO_WINDOW (0x08000000)
+        # Note: PyInstaller環境では subprocess 等のフラグ管理が重要なため、QProcessのデフォルトを信頼しつつ、
+        # 必要ならここで調整
+        
+        self.installer_process.start(cmd[0], cmd[1:])
+        
+        if not self.installer_process.waitForStarted(5000):
+            self.log_view.appendPlainText("エラー: プロセスの起動に失敗しました。")
+            self.scan_btn.setEnabled(True)
+
+    def _on_installer_error(self, error):
+        """プロセスのエラーイベント"""
+        errors = {
+            QProcess.FailedToStart: "プログラムが見つからないか、実行権限がありません。",
+            QProcess.Crashed: "プロセスがクラッシュしました。",
+            QProcess.Timedout: "タイムアウトしました。",
+            QProcess.WriteError: "書き込みエラーが発生しました。",
+            QProcess.ReadError: "読み込みエラーが発生しました。",
+            QProcess.UnknownError: "未知のエラーが発生しました。"
+        }
+        msg = errors.get(error, f"エラーコード: {error}")
+        self.log_view.appendPlainText(f"\n[ERROR] {msg}")
+        logger.error(f"Installer QProcess Error: {msg}")
+        
+    def _on_installer_output(self):
+        """インストーラーの出力を解析して進捗表示"""
+        data = self.installer_process.readAllStandardOutput().data().decode(errors='replace')
+        
+        # ログ全体をテキストエリアに追加
+        self.log_view.appendPlainText(data.strip())
+        # スクロールを末尾へ
+        self.log_view.verticalScrollBar().setValue(
+            self.log_view.verticalScrollBar().maximum()
+        )
+        
+        for line in data.splitlines():
+            line = line.strip()
+            if not line: continue
+            
+            # パッケージ名を表示
+            if "Collecting" in line:
+                pkg = line.split("Collecting")[-1].strip()
+                self.progress_label.setText(f"ダウンロード中: {pkg}")
+                # 大まかな進捗（パッケージごとに増やす）
+                val = self.progress_bar.value() + 5
+                self.progress_bar.setValue(min(val, 90))
+            elif "Installing collected packages" in line:
+                self.progress_label.setText("ライブラリをインストール中 (数分かかります)...")
+                self.progress_bar.setValue(95)
+            
+            logger.info(f"[Installer] {line}")
+
+    def _on_installer_finished(self, exit_code, exit_status):
+        """インストール完了"""
+        # self.progress_bar.setVisible(False) # プログレスバーは消さないでおく（完了100%を見せたい場合）
+        self.scan_btn.setEnabled(True)
+        
+        if exit_code == 0:
+            self.log_view.appendPlainText("\n--- セットアップ完了 ---")
+            QMessageBox.information(self, "完了", "AIエンジンのセットアップが完了しました！\nスキャンを開始できます。")
+            self.progress_label.setText("セットアップ完了")
+            # 成功した場合は数秒後にログを隠すなどの処理も可能
+        else:
+            self.log_view.appendPlainText("\n--- セットアップ失敗 ---")
+            err = self.installer_process.readAllStandardError().data().decode(errors='replace')
+            self.log_view.appendPlainText(f"Error: {err}")
+            logger.error(f"Installer Error: {err}")
+            QMessageBox.critical(self, "エラー", f"インストールに失敗しました。\n詳細ログを確認してください。")
+            self.progress_label.setText("セットアップ失敗")
+
+    @Slot()
+    def _on_start_scan_actual(self):
+        """実際の開始処理（チェック通過後）"""
         self.scan_btn.setEnabled(False)
         self.scan_btn.setVisible(False)
         self.stop_btn.setVisible(True)

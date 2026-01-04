@@ -22,6 +22,10 @@ from gui.main_window import MainWindow
 
 def setup_logging(debug: bool = False):
     """ロギングの設定"""
+    log_dir = Path.home() / ".spectramatch"
+    log_dir.mkdir(parents=True, exist_ok=True)
+    log_file = log_dir / "app.log"
+    
     log_format = "%(asctime)s - %(name)s - %(levelname)s - %(message)s"
     level = logging.DEBUG if debug else logging.INFO
     logging.basicConfig(
@@ -29,9 +33,10 @@ def setup_logging(debug: bool = False):
         format=log_format,
         handlers=[
             logging.StreamHandler(sys.stdout),
-            logging.FileHandler("spectramatch.log", encoding="utf-8")
+            logging.FileHandler(str(log_file), encoding="utf-8")
         ]
     )
+    return log_file
 
 
 def main():

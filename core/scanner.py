@@ -22,7 +22,7 @@ import numpy as np
 
 from PySide6.QtCore import QObject, Signal
 
-from .comparator import ImageComparator, ImageInfo, SimilarityGroup
+from .comparator import ImageInfo, SimilarityGroup
 from .hasher import ImageHasher
 from .database import ImageDatabase
 
@@ -37,7 +37,6 @@ logger = logging.getLogger(__name__)
 
 class ScanMode(Enum):
     """スキャンモード"""
-    PHASH = "phash"          # DCT pHash（高速）
     AI_CLIP = "ai_clip"      # CLIP セマンティック検索（高精度）
 
 
@@ -50,7 +49,7 @@ class ScanResult:
     cached_files: int = 0  # キャッシュから読み込んだファイル数
     groups: List[SimilarityGroup] = field(default_factory=list)
     errors: List[str] = field(default_factory=list)
-    mode: ScanMode = ScanMode.PHASH
+    mode: ScanMode = ScanMode.AI_CLIP
     all_images: List['ImageInfo'] = field(default_factory=list)  # 全画像リスト（ブレ画像表示用）
 
 
@@ -72,13 +71,11 @@ class ImageScanner(QObject):
     def __init__(
         self, 
         hasher: Optional[ImageHasher] = None,
-        comparator: Optional[ImageComparator] = None,
         max_workers: int = 4,
         db: Optional[ImageDatabase] = None
     ):
         super().__init__()
         self.hasher = hasher or ImageHasher()
-        self.comparator = comparator or ImageComparator(self.hasher)
         self.max_workers = max_workers
         
         # データベース
@@ -100,7 +97,11 @@ class ImageScanner(QObject):
         return self._clip_engine
     
     def is_clip_available(self) -> bool:
-        return self.clip_engine.is_available
+        try:
+            return self.clip_engine.is_available
+        except Exception as e:
+            logger.warning(f"CLIP availability check failed: {e}")
+            return False
     
     def is_faiss_available(self) -> bool:
         """Faissが利用可能かどうか"""
@@ -123,9 +124,9 @@ class ImageScanner(QObject):
     def start_scan(
         self, 
         folder_path: Path, 
-        threshold: float = 10,
+        threshold: float = 85.0,
         recursive: bool = True,
-        mode: ScanMode = ScanMode.PHASH,
+        mode: ScanMode = ScanMode.AI_CLIP,
         use_cache: bool = True
     ):
         """スキャンを開始（非同期）"""
@@ -161,44 +162,7 @@ class ImageScanner(QObject):
         
         return image_files
     
-    def _process_image_phash(self, file_path: Path) -> Optional[Dict]:
-        """pHashモード: 画像を処理してDB用データを返す"""
-        if self._stop_event.is_set():
-            return None
-        
-        try:
-            stat = file_path.stat()
-            file_size = stat.st_size
-            last_modified = stat.st_mtime
-            
-            phash = self.hasher.compute_phash(file_path)
-            phash_int = 0
-            if phash is not None:
-                phash_int = self.hasher.phash_to_int(phash)
-                # デバッグ: ハッシュ値がオール0でないか確認
-                if phash_int == 0:
-                    logger.warning(f"[Hash] オール0ハッシュ: {file_path.name}")
-            else:
-                logger.warning(f"[Hash] pHash計算失敗: {file_path.name}")
-            
-            sharpness, width, height = self.hasher.compute_sharpness(file_path)
-            
-            # デバッグログ
-            logger.debug(f"[Process] {file_path.name}: size={file_size}, {width}x{height}, phash={phash_int:016x}, blur={sharpness:.1f}")
-            
-            return {
-                'path': file_path,
-                'file_size': file_size,
-                'last_modified': last_modified,
-                'width': width,
-                'height': height,
-                'phash_int': phash_int,
-                'blur_score': sharpness,
-                'embedding': None
-            }
-        except Exception as e:
-            logger.error(f"画像処理エラー: {file_path} - {e}")
-            return None
+    # _process_image_phash は削除されました
     
     def _process_image_clip(self, file_path: Path) -> Optional[Dict]:
         """CLIPモード: 画像を処理してDB用データを返す"""
@@ -298,117 +262,74 @@ class ImageScanner(QObject):
                 self.scan_completed.emit(result)
                 return
             
-            # Phase 3: 画像処理
-            mode_name = "AIセマンティック分析" if mode == ScanMode.AI_CLIP else "ハッシュ計算"
-            process_func = (
-                self._process_image_clip if mode == ScanMode.AI_CLIP 
-                else self._process_image_phash
-            )
-            
+            # CLIPモードはバッチ処理（高速化）
+            mode_name = "AIセマンティック分析"
             processed = cached_count
             batch_records: List[Dict] = []
             BATCH_SIZE = 100
             
-            # AIモードはバッチ処理（高速化）、pHashは並列
-            if mode == ScanMode.AI_CLIP:
-                CLIP_BATCH_SIZE = 32  # RTX4060に最適化
+            CLIP_BATCH_SIZE = 32  # RTX4060に最適化
+            
+            for batch_start in range(0, len(files_to_process), CLIP_BATCH_SIZE):
+                if self._stop_event.is_set():
+                    break
                 
-                for batch_start in range(0, len(files_to_process), CLIP_BATCH_SIZE):
-                    if self._stop_event.is_set():
-                        break
-                    
-                    batch_end = min(batch_start + CLIP_BATCH_SIZE, len(files_to_process))
-                    batch_paths = files_to_process[batch_start:batch_end]
-                    
-                    # ファイル情報を先に取得
-                    file_infos = []
-                    for path in batch_paths:
-                        try:
-                            stat = path.stat()
-                            sharpness, width, height = self.hasher.compute_sharpness(path)
-                            file_infos.append({
-                                'path': path,
-                                'file_size': stat.st_size,
-                                'last_modified': stat.st_mtime,
-                                'width': width,
-                                'height': height,
-                                'blur_score': sharpness
-                            })
-                        except Exception as e:
-                            logger.error(f"ファイル情報取得エラー: {path} - {e}")
-                            file_infos.append(None)
-                    
-                    # バッチでCLIP埋め込みを抽出
-                    valid_paths = [info['path'] for info in file_infos if info is not None]
-                    embeddings = self.clip_engine.extract_embeddings_batch(valid_paths, batch_size=CLIP_BATCH_SIZE)
-                    
-                    # 結果をマージ
-                    embed_idx = 0
-                    for i, info in enumerate(file_infos):
-                        if info is None:
-                            result.skipped_files += 1
-                            result.errors.append(f"スキップ: {batch_paths[i]}")
+                batch_end = min(batch_start + CLIP_BATCH_SIZE, len(files_to_process))
+                batch_paths = files_to_process[batch_start:batch_end]
+                
+                # ファイル情報を先に取得
+                file_infos = []
+                for path in batch_paths:
+                    try:
+                        stat = path.stat()
+                        sharpness, width, height = self.hasher.compute_sharpness(path)
+                        file_infos.append({
+                            'path': path,
+                            'file_size': stat.st_size,
+                            'last_modified': stat.st_mtime,
+                            'width': width,
+                            'height': height,
+                            'blur_score': sharpness
+                        })
+                    except Exception as e:
+                        logger.error(f"ファイル情報取得エラー: {path} - {e}")
+                        file_infos.append(None)
+                
+                # バッチでCLIP埋め込みを抽出
+                valid_paths = [info['path'] for info in file_infos if info is not None]
+                embeddings = self.clip_engine.extract_embeddings_batch(valid_paths, batch_size=CLIP_BATCH_SIZE)
+                
+                # 結果をマージ
+                embed_idx = 0
+                for i, info in enumerate(file_infos):
+                    if info is None:
+                        result.skipped_files += 1
+                        result.errors.append(f"スキップ: {batch_paths[i]}")
+                    else:
+                        embedding = embeddings[embed_idx] if embed_idx < len(embeddings) else None
+                        embed_idx += 1
+                        
+                        if embedding is not None:
+                            info['embedding'] = embedding
+                            info['phash_int'] = 0
+                            batch_records.append(info)
+                            result.processed_files += 1
                         else:
-                            embedding = embeddings[embed_idx] if embed_idx < len(embeddings) else None
-                            embed_idx += 1
-                            
-                            if embedding is not None:
-                                info['embedding'] = embedding
-                                info['phash_int'] = 0
-                                batch_records.append(info)
-                                result.processed_files += 1
-                            else:
-                                result.skipped_files += 1
-                                result.errors.append(f"CLIP処理失敗: {info['path']}")
-                        
-                        processed += 1
-                    
-                    # バッチでDBに保存
-                    if len(batch_records) >= BATCH_SIZE:
-                        self.db.batch_upsert(batch_records)
-                        batch_records = []
-                    
-                    # 進捗更新（バッチ単位で更新）
-                    self.progress_updated.emit(
-                        processed, result.total_files,
-                        f"{mode_name}中... ({processed}/{result.total_files})"
-                    )
-            else:
-                with ThreadPoolExecutor(max_workers=self.max_workers) as executor:
-                    future_to_path = {
-                        executor.submit(process_func, path): path 
-                        for path in files_to_process
-                    }
-                    
-                    for future in as_completed(future_to_path):
-                        if self._stop_event.is_set():
-                            executor.shutdown(wait=False, cancel_futures=True)
-                            break
-                        
-                        path = future_to_path[future]
-                        try:
-                            rec = future.result()
-                            if rec:
-                                batch_records.append(rec)
-                                result.processed_files += 1
-                            else:
-                                result.skipped_files += 1
-                                result.errors.append(f"スキップ: {path}")
-                        except Exception as e:
                             result.skipped_files += 1
-                            result.errors.append(f"エラー: {path} - {e}")
-                        
-                        processed += 1
-                        
-                        if len(batch_records) >= BATCH_SIZE:
-                            self.db.batch_upsert(batch_records)
-                            batch_records = []
-                        
-                        if processed % 20 == 0 or processed == result.total_files:
-                            self.progress_updated.emit(
-                                processed, result.total_files,
-                                f"{mode_name}中... ({processed}/{result.total_files})"
-                            )
+                            result.errors.append(f"CLIP処理失敗: {info['path']}")
+                    
+                    processed += 1
+                
+                # バッチでDBに保存
+                if len(batch_records) >= BATCH_SIZE:
+                    self.db.batch_upsert(batch_records)
+                    batch_records = []
+                
+                # 進捗更新（バッチ単位で更新）
+                self.progress_updated.emit(
+                    processed, result.total_files,
+                    f"{mode_name}中... ({processed}/{result.total_files})"
+                )
             
             # 残りをDBに保存
             if batch_records:
@@ -419,16 +340,13 @@ class ImageScanner(QObject):
                 self.scan_completed.emit(result)
                 return
             
-            # Phase 4: 類似度分析（Faiss使用）
+            # Phase 4: 類似度分析
             self.progress_updated.emit(
                 result.total_files, result.total_files,
                 "類似画像を分析中..."
             )
             
-            if mode == ScanMode.AI_CLIP:
-                result.groups = self._find_groups_clip(threshold)
-            else:
-                result.groups = self._find_groups_phash(int(threshold))
+            result.groups = self._find_groups_clip(threshold)
             
             self.progress_updated.emit(
                 result.total_files,
@@ -459,121 +377,7 @@ class ImageScanner(QObject):
         finally:
             self.scan_completed.emit(result)
     
-    def _find_groups_phash(self, threshold: int) -> List[SimilarityGroup]:
-        """DBからpHashデータを取得してグループ化"""
-        # Faissが利用可能ならFaissを使用
-        try:
-            from .faiss_engine import find_similar_groups_faiss_phash, _check_faiss_available
-            if _check_faiss_available():
-                phash_data = self.db.get_all_phashes()
-                if len(phash_data) < 2:
-                    return []
-                
-                groups = find_similar_groups_faiss_phash(phash_data, threshold)
-                return self._convert_to_similarity_groups(groups, is_phash=True)
-        except ImportError:
-            pass
-        
-        # フォールバック: NumPy実装
-        return self._find_groups_phash_numpy(threshold)
-    
-    def _find_groups_phash_numpy(self, threshold: int) -> List[SimilarityGroup]:
-        """NumPyによるpHashグループ化（フォールバック）"""
-        phash_data = self.db.get_all_phashes()
-        logger.info(f"[Compare] pHashデータ数: {len(phash_data)}, 閾値: {threshold}")
-        
-        if len(phash_data) < 2:
-            logger.warning("[Compare] pHashデータが2件未満のため比較をスキップ")
-            return []
-        
-        n = len(phash_data)
-        ids = [item[0] for item in phash_data]
-        paths = [item[1] for item in phash_data]
-        phashes = np.array([item[2] for item in phash_data], dtype=np.uint64)
-        
-        # デバッグ: ユニークなハッシュ数を確認
-        unique_hashes = len(set(phashes.tolist()))
-        logger.info(f"[Compare] ユニークハッシュ数: {unique_hashes}/{n}")
-        
-        # ベクトル化ハミング距離
-        xor_matrix = phashes[:, np.newaxis] ^ phashes[np.newaxis, :]
-        
-        def popcount_vec(x):
-            x = x.astype(np.uint64)
-            result = np.zeros_like(x, dtype=np.int32)
-            for shift in range(8):
-                byte_vals = ((x >> (shift * 8)) & 0xFF).astype(np.uint8)
-                result += np.array([bin(b).count('1') for b in byte_vals.flat]).reshape(byte_vals.shape)
-            return result
-        
-        distance_matrix = popcount_vec(xor_matrix)
-        
-        # デバッグ: 距離行列の統計（対角線以外）
-        upper_tri = np.triu_indices(n, k=1)
-        distances_upper = distance_matrix[upper_tri]
-        if len(distances_upper) > 0:
-            logger.info(f"[Compare] 距離統計: min={distances_upper.min()}, max={distances_upper.max()}, mean={distances_upper.mean():.2f}")
-            # 距離0のペア数（完全一致）
-            exact_matches = np.sum(distances_upper == 0)
-            logger.info(f"[Compare] 完全一致ペア数 (距離=0): {exact_matches}")
-        
-        similar_pairs = np.argwhere(
-            (distance_matrix <= threshold) & 
-            (np.triu(np.ones((n, n), dtype=bool), k=1))
-        )
-        
-        logger.info(f"[Compare] 閾値{threshold}以下のペア数: {len(similar_pairs)}")
-        
-        # Union-Find
-        parent = list(range(n))
-        def find(x):
-            if parent[x] != x:
-                parent[x] = find(parent[x])
-            return parent[x]
-        def union(x, y):
-            px, py = find(x), find(y)
-            if px != py:
-                parent[py] = px
-        
-        for i, j in similar_pairs:
-            union(i, j)
-        
-        groups_dict: Dict[int, List[int]] = {}
-        for i in range(n):
-            root = find(i)
-            if root not in groups_dict:
-                groups_dict[root] = []
-            groups_dict[root].append(i)
-        
-        result = []
-        group_id = 0
-        for members in groups_dict.values():
-            if len(members) >= 2:
-                group_id += 1
-                group_images = []
-                for m in members:
-                    img_data = self.db.get_image_by_path(paths[m])
-                    if img_data:
-                        info = ImageInfo(
-                            path=Path(img_data['path']),
-                            file_size=img_data.get('file_size', 0),
-                            width=img_data.get('width', 0),
-                            height=img_data.get('height', 0),
-                            phash_int=img_data.get('phash_int', 0),
-                            sharpness_score=img_data.get('blur_score', 0)
-                        )
-                        group_images.append(info)
-                
-                if len(group_images) >= 2:
-                    result.append(SimilarityGroup(
-                        group_id=group_id,
-                        images=group_images,
-                        is_exact_match=False,
-                        min_distance=0,
-                        max_distance=threshold
-                    ))
-        
-        return result
+    # _find_groups_phash は削除されました
     
     def _find_groups_clip(self, threshold: float) -> List[SimilarityGroup]:
         """DBからCLIPデータを取得してグループ化"""
