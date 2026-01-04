@@ -128,32 +128,11 @@ class MainWindow(QMainWindow):
         sep2 = QFrame()
         sep2.setFrameShape(QFrame.HLine)
         sep2.setStyleSheet("background-color: #4a4a4a;")
-        layout.addWidget(sep2)
-        
-        # アルゴリズム表示セクション
-        algo_section = QLabel("🧠 検出アルゴリズム")
-        algo_section.setObjectName("sectionLabel")
-        layout.addWidget(algo_section)
-        
-        # CLIPモード表示（ドロップダウンからラベルに変更）
-        algo_label = QLabel("🤖 AI Semantic (CLIP)")
-        algo_label.setStyleSheet(
-            "background-color: #3c3c3c; border: 1px solid #4a4a4a; "
-            "border-radius: 4px; padding: 8px; font-size: 13px;"
-        )
-        layout.addWidget(algo_label)
         
         # 内部で使用するダミーのコンボボックス（互換性維持）
         self.algo_combo = QComboBox()
         self.algo_combo.addItem("🤖 AI Semantic (CLIP)", ScanMode.AI_CLIP)
         self.algo_combo.setVisible(False)
-        layout.addWidget(self.algo_combo)
-        
-        # アルゴリズム説明
-        self.algo_desc = QLabel("OpenAI CLIPによるセマンティック検索\n意味的類似性を捉える高精度モード")
-        self.algo_desc.setStyleSheet("color: #9b59b6; font-size: 10px;")
-        self.algo_desc.setWordWrap(True)
-        layout.addWidget(self.algo_desc)
         
         # キャッシュ削除ボタン
         self.clear_cache_btn = QPushButton("🗑️ キャッシュを削除")
