@@ -235,13 +235,34 @@ class ImageScanner(QObject):
                 self.scan_completed.emit(result)
                 return
             
-            # Phase 2: 増分スキャン（キャッシュ確認）
+            # Phase 2: 増分スキャン（キャッシュ確認 + 削除検知）
             self.progress_updated.emit(0, result.total_files, "キャッシュを確認中...")
             
             files_to_process: List[Path] = []
             cached_count = 0
             
+            # 現在のファイルパスをセットに変換（高速検索用）
+            current_file_paths = {str(p) for p in image_files}
+            
             if use_cache:
+                # 削除されたファイルの検知（スキャン対象フォルダ内のみ）
+                folder_prefix = str(folder_path)
+                db_paths = self.db.get_all_paths()
+                # このフォルダに属するDBパスのうち、実際に存在しないものを抽出
+                stale_paths = [
+                    p for p in db_paths 
+                    if p.startswith(folder_prefix) and p not in current_file_paths
+                ]
+                
+                if stale_paths:
+                    logger.info(f"Removing {len(stale_paths)} deleted files from database")
+                    self.progress_updated.emit(
+                        0, result.total_files,
+                        f"削除されたファイルをクリーンアップ中... ({len(stale_paths)}件)"
+                    )
+                    self.db.delete_by_paths(stale_paths)
+                
+                # 新規・変更ファイルの検出
                 for path in image_files:
                     if self._stop_event.is_set():
                         break

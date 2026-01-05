@@ -166,3 +166,36 @@ class ImageDatabase:
     
     def vacuum(self):
         self.conn.execute("VACUUM")
+    
+    def get_all_paths(self) -> List[str]:
+        """DBに登録されている全ての画像パスを取得"""
+        cursor = self.conn.cursor()
+        cursor.execute("SELECT path FROM images")
+        return [row[0] for row in cursor.fetchall()]
+    
+    def delete_by_paths(self, paths: List[str]) -> int:
+        """指定されたパスのレコードを一括削除
+        
+        Args:
+            paths: 削除するファイルパスのリスト
+        
+        Returns:
+            削除されたレコード数
+        """
+        if not paths:
+            return 0
+        
+        cursor = self.conn.cursor()
+        # SQLiteのパラメータ制限に注意して分割処理
+        BATCH_SIZE = 999
+        deleted_count = 0
+        
+        for i in range(0, len(paths), BATCH_SIZE):
+            batch = paths[i:i + BATCH_SIZE]
+            placeholders = ','.join(['?' for _ in batch])
+            cursor.execute(f"DELETE FROM images WHERE path IN ({placeholders})", batch)
+            deleted_count += cursor.rowcount
+        
+        self.conn.commit()
+        logger.info(f"Deleted {deleted_count} stale records from database")
+        return deleted_count

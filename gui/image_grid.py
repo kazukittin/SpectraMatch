@@ -162,6 +162,7 @@ class ImageCard(QFrame):
     """個別画像カードウィジェット（軽量版）"""
     
     selection_changed = Signal(object, bool)
+    clicked = Signal(object)  # image_info をシグナルで送信
     THUMBNAIL_SIZE = 120
     
     def __init__(self, image_info: ImageInfo, parent=None):
@@ -289,6 +290,12 @@ class ImageCard(QFrame):
         self.is_marked_delete = delete
         self._update_style()
     
+    def mousePressEvent(self, event):
+        """シングルクリックでプレビュー表示"""
+        if event.button() == Qt.LeftButton:
+            self.clicked.emit(self.image_info)
+        super().mousePressEvent(event)
+    
     def mouseDoubleClickEvent(self, event):
         """ダブルクリックで画像をデフォルトアプリで開く"""
         if event.button() == Qt.LeftButton:
@@ -298,6 +305,8 @@ class ImageCard(QFrame):
 
 class SimilarityGroupWidget(QGroupBox):
     """類似グループ表示ウィジェット"""
+    
+    card_clicked = Signal(object)  # image_info
     
     def __init__(self, group: SimilarityGroup, parent=None):
         group_type = "完全一致" if group.is_exact_match else f"類似 (距離: {group.min_distance}-{group.max_distance})"
@@ -362,6 +371,7 @@ class SimilarityGroupWidget(QGroupBox):
         
         for image_info in images_to_show:
             card = ImageCard(image_info)
+            card.clicked.connect(self.card_clicked)
             self.cards.append(card)
             grid_layout.addWidget(card)
         
@@ -430,6 +440,7 @@ class ImageGridWidget(QScrollArea):
     GROUPS_PER_PAGE = 5  # パフォーマンス優先で5グループに制限
     
     files_to_delete_changed = Signal(int)
+    image_selected = Signal(object)  # image_info
     
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -548,6 +559,7 @@ class ImageGridWidget(QScrollArea):
         # グループウィジェットを作成
         for group in page_groups:
             widget = SimilarityGroupWidget(group)
+            widget.card_clicked.connect(self.image_selected)
             for card in widget.cards:
                 card.selection_changed.connect(self._on_selection_changed)
             self.group_widgets.append(widget)
@@ -661,6 +673,7 @@ class BlurredImageCard(QFrame):
     """ブレ画像用のカードウィジェット"""
     
     selection_changed = Signal(object, bool)
+    clicked = Signal(object)  # image_info をシグナルで送信
     THUMBNAIL_SIZE = 120
     
     def __init__(self, image_info: ImageInfo, rank: int, parent=None):
@@ -780,6 +793,12 @@ class BlurredImageCard(QFrame):
         self.is_marked_delete = delete
         self._update_style()
     
+    def mousePressEvent(self, event):
+        """シングルクリックでプレビュー表示"""
+        if event.button() == Qt.LeftButton:
+            self.clicked.emit(self.image_info)
+        super().mousePressEvent(event)
+    
     def mouseDoubleClickEvent(self, event):
         """ダブルクリックで画像をデフォルトアプリで開く"""
         if event.button() == Qt.LeftButton:
@@ -798,6 +817,7 @@ class BlurredImagesGridWidget(QScrollArea):
     IMAGES_PER_PAGE = 50
     
     files_to_delete_changed = Signal(int)
+    image_selected = Signal(object)  # image_info
     
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -916,6 +936,7 @@ class BlurredImagesGridWidget(QScrollArea):
         for i, image_info in enumerate(page_images):
             rank = start_idx + i + 1  # 全体での順位
             card = BlurredImageCard(image_info, rank)
+            card.clicked.connect(self.image_selected)
             card.selection_changed.connect(self._on_selection_changed)
             self.cards.append(card)
             row = i // cols

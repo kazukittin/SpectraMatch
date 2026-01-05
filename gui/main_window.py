@@ -1,8 +1,7 @@
 # -*- coding: utf-8 -*-
 """
 SpectraMatch - Main Window
-QSplitterを使用した左サイドバー + 右メインエリアのレイアウト
-アルゴリズム選択: pHash (高速) / AI CLIP (高精度)
+シンプルなレイアウト：ヘッダー + メインエリア + フッター + プレビューパネル
 """
 
 import os
@@ -13,10 +12,9 @@ from typing import List
 from PySide6.QtCore import Qt, Slot, QProcess
 from PySide6.QtWidgets import (
     QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
-    QLabel, QPushButton, QSlider, QProgressBar,
-    QFileDialog, QMessageBox, QFrame, QApplication,
-    QSplitter, QListWidget, QListWidgetItem, QSizePolicy,
-    QComboBox, QStackedWidget, QPlainTextEdit, QMenu
+    QLabel, QPushButton, QProgressBar,
+    QFileDialog, QMessageBox, QApplication,
+    QComboBox, QStackedWidget, QPlainTextEdit, QSplitter
 )
 from PySide6.QtGui import QFont
 
@@ -24,6 +22,8 @@ from core.scanner import ImageScanner, ScanResult, ScanMode
 from core.comparator import SimilarityGroup
 from core.clip_engine import is_ai_installed, is_ai_installed_on_disk, get_install_command
 from .image_grid import ImageGridWidget, BlurredImagesGridWidget
+from .settings_dialog import SettingsDialog
+from .preview_panel import PreviewPanel
 from .styles import DarkTheme
 
 logger = logging.getLogger(__name__)
@@ -43,6 +43,7 @@ class MainWindow(QMainWindow):
         super().__init__()
         self.scanner = ImageScanner()
         self.current_folders: List[Path] = []
+        self.current_threshold: int = 85  # デフォルト閾値
         self.scan_result: ScanResult = None
         self.current_view_mode = "similar"  # "similar" or "blurred"
         
@@ -52,213 +53,46 @@ class MainWindow(QMainWindow):
     def _setup_ui(self):
         self.setWindowTitle("SpectraMatch - 画像類似検出・削除ツール")
         self.setMinimumSize(1280, 800)
-        self.resize(1400, 900)
+        self.resize(1500, 900)
         self.setStyleSheet(DarkTheme.get_stylesheet())
         
-        # メインスプリッター
+        # 中央ウィジェット
+        central_widget = QWidget()
+        central_layout = QHBoxLayout(central_widget)
+        central_layout.setContentsMargins(0, 0, 0, 0)
+        central_layout.setSpacing(0)
+        
+        # スプリッター（メインエリア + プレビューパネル）
         splitter = QSplitter(Qt.Horizontal)
-        splitter.setHandleWidth(3)
-        self.setCentralWidget(splitter)
+        splitter.setHandleWidth(2)
+        splitter.setStyleSheet("""
+            QSplitter::handle {
+                background-color: #4a4a4a;
+            }
+            QSplitter::handle:hover {
+                background-color: #00ffff;
+            }
+        """)
         
-        # 左サイドバー
-        sidebar = self._create_sidebar()
-        splitter.addWidget(sidebar)
-        
-        # 右メインエリア
+        # メインエリア
         main_area = self._create_main_area()
         splitter.addWidget(main_area)
         
-        # 初期サイズ比率 (サイドバー:メインエリア = 300:残り)
-        splitter.setSizes([300, 1100])
-        splitter.setStretchFactor(0, 0)  # サイドバーは固定
-        splitter.setStretchFactor(1, 1)  # メインエリアは伸縮
+        # プレビューパネル（右側）
+        self.preview_panel = PreviewPanel()
+        splitter.addWidget(self.preview_panel)
+        
+        # 初期サイズ比率（メイン:プレビュー = 残り:350）
+        splitter.setSizes([1100, 350])
+        splitter.setStretchFactor(0, 1)  # メインエリアは伸縮
+        splitter.setStretchFactor(1, 0)  # プレビューパネルは固定
+        
+        central_layout.addWidget(splitter)
+        self.setCentralWidget(central_widget)
     
-    def _create_sidebar(self) -> QWidget:
-        """左サイドバーを作成"""
-        sidebar = QWidget()
-        sidebar.setObjectName("sidebarWidget")
-        sidebar.setMinimumWidth(280)
-        sidebar.setMaximumWidth(400)
-        
-        layout = QVBoxLayout(sidebar)
-        layout.setContentsMargins(16, 16, 16, 16)
-        layout.setSpacing(16)
-        
-        # タイトル
-        title = QLabel("SpectraMatch")
-        title.setObjectName("titleLabel")
-        layout.addWidget(title)
-        
-        subtitle = QLabel("画像類似検出・削除ツール")
-        subtitle.setStyleSheet("color: #808080; font-size: 11px; margin-bottom: 10px;")
-        layout.addWidget(subtitle)
-        
-        # 区切り線
-        sep1 = QFrame()
-        sep1.setFrameShape(QFrame.HLine)
-        sep1.setStyleSheet("background-color: #4a4a4a;")
-        layout.addWidget(sep1)
-        
-        # スキャン対象フォルダセクション
-        folder_section = QLabel("📁 スキャン対象フォルダ")
-        folder_section.setObjectName("sectionLabel")
-        layout.addWidget(folder_section)
-        
-        # フォルダリスト
-        self.folder_list = QListWidget()
-        self.folder_list.setMinimumHeight(120)
-        self.folder_list.setMaximumHeight(200)
-        layout.addWidget(self.folder_list)
-        
-        # フォルダ操作ボタン
-        folder_btn_layout = QHBoxLayout()
-        folder_btn_layout.setSpacing(8)
-        
-        self.add_folder_btn = QPushButton("+ 追加")
-        self.add_folder_btn.clicked.connect(self._on_add_folder)
-        folder_btn_layout.addWidget(self.add_folder_btn)
-        
-        self.remove_folder_btn = QPushButton("- 削除")
-        self.remove_folder_btn.clicked.connect(self._on_remove_folder)
-        folder_btn_layout.addWidget(self.remove_folder_btn)
-        
-        layout.addLayout(folder_btn_layout)
-        
-        # 区切り線
-        sep2 = QFrame()
-        sep2.setFrameShape(QFrame.HLine)
-        sep2.setStyleSheet("background-color: #4a4a4a;")
-        
-        # 内部で使用するダミーのコンボボックス（互換性維持）
-        self.algo_combo = QComboBox()
-        self.algo_combo.addItem("🤖 AI Semantic (CLIP)", ScanMode.AI_CLIP)
-        self.algo_combo.setVisible(False)
-        
-        # キャッシュ削除ボタン
-        self.clear_cache_btn = QPushButton("🗑️ キャッシュを削除")
-        self.clear_cache_btn.setStyleSheet(
-            "background-color: #c0392b; color: white; "
-            "font-weight: bold; padding: 8px; border-radius: 4px;"
-        )
-        self.clear_cache_btn.setToolTip(
-            "データベースに保存された画像情報を削除します\n"
-            "次回スキャン時に全ファイルを再解析します"
-        )
-        self.clear_cache_btn.clicked.connect(self._on_clear_cache)
-        layout.addWidget(self.clear_cache_btn)
-        
-        # 区切り線
-        sep3 = QFrame()
-        sep3.setFrameShape(QFrame.HLine)
-        sep3.setStyleSheet("background-color: #4a4a4a;")
-        layout.addWidget(sep3)
-        
-        # 閾値設定セクション (CLIPモードデフォルト)
-        self.threshold_section = QLabel("🎚️ 類似度閾値 (類似度%)")
-        self.threshold_section.setObjectName("sectionLabel")
-        layout.addWidget(self.threshold_section)
-
-        
-        # スライダーと値表示 (CLIPモード: 50-99%)
-        slider_layout = QHBoxLayout()
-        slider_layout.setSpacing(12)
-        
-        self.threshold_slider = QSlider(Qt.Horizontal)
-        self.threshold_slider.setRange(50, 99)
-        self.threshold_slider.setValue(85)
-        self.threshold_slider.setTickPosition(QSlider.TicksBelow)
-        self.threshold_slider.setTickInterval(10)
-        self.threshold_slider.valueChanged.connect(self._on_threshold_changed)
-        slider_layout.addWidget(self.threshold_slider)
-        
-        self.threshold_value_label = QLabel("85%")
-        self.threshold_value_label.setFixedWidth(40)
-        self.threshold_value_label.setAlignment(Qt.AlignCenter)
-        self.threshold_value_label.setStyleSheet(
-            "background-color: #00ffff; color: #1e1e1e; "
-            "font-weight: bold; border-radius: 4px; padding: 4px;"
-        )
-        slider_layout.addWidget(self.threshold_value_label)
-        
-        layout.addLayout(slider_layout)
-        
-        # 閾値説明
-        self.threshold_desc = QLabel("標準 (85%以上を類似とみなす)")
-        self.threshold_desc.setStyleSheet("color: #808080; font-size: 11px;")
-        layout.addWidget(self.threshold_desc)
-        
-        # 区切り線
-        sep3 = QFrame()
-        sep3.setFrameShape(QFrame.HLine)
-        sep3.setStyleSheet("background-color: #4a4a4a;")
-        layout.addWidget(sep3)
-        
-        # スキャンボタン
-        self.scan_btn = QPushButton("🔍 スキャン開始")
-        self.scan_btn.setObjectName("scanButton")
-        self.scan_btn.setMinimumHeight(48)
-        self.scan_btn.setEnabled(False)
-        self.scan_btn.clicked.connect(self._on_start_scan)
-        layout.addWidget(self.scan_btn)
-        
-        # 中止ボタン
-        self.stop_btn = QPushButton("⏹ 中止")
-        self.stop_btn.setMinimumHeight(40)
-        self.stop_btn.setVisible(False)
-        self.stop_btn.setStyleSheet(
-            "background-color: #e74c3c; color: white; font-weight: bold;"
-        )
-        self.stop_btn.clicked.connect(self._on_stop_scan)
-        layout.addWidget(self.stop_btn)
-        
-        # プログレスバー
-        self.progress_bar = QProgressBar()
-        self.progress_bar.setVisible(False)
-        self.progress_bar.setTextVisible(False)
-        layout.addWidget(self.progress_bar)
-        # 進捗ラベル
-        self.progress_label = QLabel("準備完了")
-        self.progress_label.setStyleSheet("color: #95a5a6; font-size: 11px;")
-        layout.addWidget(self.progress_label)
-        
-        # ログ表示エリア (普段は非表示)
-        self.log_view = QPlainTextEdit()
-        self.log_view.setReadOnly(True)
-        self.log_view.setMaximumHeight(150)
-        self.log_view.setStyleSheet("""
-            background-color: #1a1a1a;
-            color: #2ecc71;
-            font-family: 'Consolas', monospace;
-            font-size: 10px;
-            border: 1px solid #333;
-        """)
-        self.log_view.setVisible(False)
-        layout.addWidget(self.log_view)
-        
-        layout.addStretch()
-        
-        # 区切り線
-        sep4 = QFrame()
-        sep4.setFrameShape(QFrame.HLine)
-        sep4.setStyleSheet("background-color: #4a4a4a;")
-        layout.addWidget(sep4)
-        
-        # 削除セクション
-        self.delete_count_label = QLabel("")
-        self.delete_count_label.setStyleSheet("color: #e74c3c; font-weight: bold;")
-        layout.addWidget(self.delete_count_label)
-        
-        self.delete_btn = QPushButton("🗑️ 選択した画像を削除")
-        self.delete_btn.setObjectName("deleteButton")
-        self.delete_btn.setMinimumHeight(44)
-        self.delete_btn.setEnabled(False)
-        self.delete_btn.clicked.connect(self._on_delete_files)
-        layout.addWidget(self.delete_btn)
-        
-        return sidebar
     
     def _create_main_area(self) -> QWidget:
-        """右メインエリアを作成"""
+        """メインエリアを作成（サイドバーなし版）"""
         main_widget = QWidget()
         layout = QVBoxLayout(main_widget)
         layout.setContentsMargins(0, 0, 0, 0)
@@ -268,72 +102,104 @@ class MainWindow(QMainWindow):
         header = QWidget()
         header.setStyleSheet("background-color: #2b2b2b; border-bottom: 1px solid #4a4a4a;")
         header_layout = QHBoxLayout(header)
-        header_layout.setContentsMargins(20, 12, 20, 12)
-        header_layout.setSpacing(16)
+        header_layout.setContentsMargins(16, 10, 16, 10)
+        header_layout.setSpacing(8)
         
-        # 表示モード切替ボタン
+        # 表示モード切替ボタン - 類似画像
         self.view_similar_btn = QPushButton("📊 類似画像")
-        self.view_similar_btn.setStyleSheet(
-            "background-color: #00ffff; color: #1e1e1e; "
-            "font-weight: bold; padding: 8px 16px; border-radius: 4px;"
-        )
         self.view_similar_btn.setCheckable(True)
         self.view_similar_btn.setChecked(True)
+        self.view_similar_btn.setToolTip(
+            "🔍 類似画像表示モード\n\n"
+            "AI (CLIP) が検出した類似画像をグループ別に表示します。\n"
+            "同じような構図・被写体の画像をまとめて確認できます。"
+        )
         self.view_similar_btn.clicked.connect(lambda: self._switch_view("similar"))
+        self.view_similar_btn.setStyleSheet("""
+            QPushButton {
+                background-color: #00ffff;
+                color: #1e1e1e;
+                font-weight: bold;
+                padding: 8px 16px;
+                border-radius: 4px;
+                border: 2px solid transparent;
+            }
+            QPushButton:hover {
+                background-color: #33ffff;
+                border: 2px solid #00ffff;
+            }
+            QPushButton:checked {
+                background-color: #00ffff;
+            }
+        """)
         header_layout.addWidget(self.view_similar_btn)
         
+        # 表示モード切替ボタン - ブレ画像
         self.view_blurred_btn = QPushButton("📷 ブレ画像")
-        self.view_blurred_btn.setStyleSheet(
-            "background-color: #4a4a4a; color: white; "
-            "font-weight: bold; padding: 8px 16px; border-radius: 4px;"
-        )
         self.view_blurred_btn.setCheckable(True)
         self.view_blurred_btn.setChecked(False)
-        self.view_blurred_btn.setToolTip("鮮明度スコアが低い（ブレている）画像を\n降順に表示します")
+        self.view_blurred_btn.setToolTip(
+            "📷 ブレ画像表示モード\n\n"
+            "鮮明度スコアが低い（ブレている）画像を表示します。\n"
+            "ブレが酷い順にソートされるので、不要な画像を素早く特定できます。"
+        )
         self.view_blurred_btn.clicked.connect(lambda: self._switch_view("blurred"))
+        self.view_blurred_btn.setStyleSheet("""
+            QPushButton {
+                background-color: #4a4a4a;
+                color: white;
+                font-weight: bold;
+                padding: 8px 16px;
+                border-radius: 4px;
+                border: 2px solid transparent;
+            }
+            QPushButton:hover {
+                background-color: #5a5a5a;
+                border: 2px solid #e74c3c;
+            }
+            QPushButton:checked {
+                background-color: #e74c3c;
+            }
+        """)
         header_layout.addWidget(self.view_blurred_btn)
-        
-        header_layout.addSpacing(20)
-        
-        # スマート自動選択ボタン（類似画像モード用）
-        self.smart_select_btn = QPushButton("⚡ 全グループをスマート選択")
-        self.smart_select_btn.setStyleSheet(
-            "background-color: #9b59b6; color: white; "
-            "font-weight: bold; padding: 8px 16px; border-radius: 4px;"
-        )
-        self.smart_select_btn.setToolTip(
-            "全グループで品質（解像度・鮮明度・サイズ）に基づいて\n"
-            "最良の画像を残し、他を削除対象に自動選択します"
-        )
-        self.smart_select_btn.setEnabled(False)
-        self.smart_select_btn.clicked.connect(self._on_smart_select_all)
-        header_layout.addWidget(self.smart_select_btn)
-        
-        # ブレ画像用ボタン（ブレ画像モード時のみ表示）
-        self.select_all_blurred_btn = QPushButton("✓ 全選択")
-        self.select_all_blurred_btn.setStyleSheet(
-            "background-color: #e74c3c; color: white; "
-            "font-weight: bold; padding: 8px 16px; border-radius: 4px;"
-        )
-        self.select_all_blurred_btn.setToolTip("現在ページの全画像を削除対象に選択")
-        self.select_all_blurred_btn.setVisible(False)
-        self.select_all_blurred_btn.clicked.connect(self._on_select_all_blurred)
-        header_layout.addWidget(self.select_all_blurred_btn)
-        
-        self.clear_blurred_btn = QPushButton("✕ 選択解除")
-        self.clear_blurred_btn.setStyleSheet(
-            "background-color: #4a4a4a; color: white; "
-            "font-weight: bold; padding: 8px 16px; border-radius: 4px;"
-        )
-        self.clear_blurred_btn.setVisible(False)
-        self.clear_blurred_btn.clicked.connect(self._on_clear_blurred_selection)
-        header_layout.addWidget(self.clear_blurred_btn)
         
         header_layout.addStretch()
         
-        self.status_label = QLabel("フォルダを追加してスキャンを開始してください")
-        self.status_label.setStyleSheet("color: #808080;")
+        self.status_label = QLabel("⚙️ 設定からフォルダを追加 → 🔍 スキャン開始")
+        self.status_label.setStyleSheet("color: #808080; font-size: 12px;")
         header_layout.addWidget(self.status_label)
+        
+        header_layout.addSpacing(12)
+        
+        # 設定ボタン（アイコンのみ）
+        self.settings_btn = QPushButton("⚙")
+        self.settings_btn.setMinimumSize(44, 44)
+        self.settings_btn.setMaximumSize(44, 44)
+        self.settings_btn.setToolTip(
+            "⚙️ 設定\n\n"
+            "• スキャン対象フォルダの追加・削除\n"
+            "• 類似度閾値の調整\n"
+            "• キャッシュの管理"
+        )
+        self.settings_btn.clicked.connect(self._on_open_settings)
+        self.settings_btn.setStyleSheet("""
+            QPushButton {
+                background-color: #3a3a3a;
+                color: #b0b0b0;
+                font-size: 24px;
+                border: none;
+                border-radius: 22px;
+                padding: 0px;
+            }
+            QPushButton:hover {
+                background-color: #4a4a4a;
+                color: #00ffff;
+            }
+            QPushButton:pressed {
+                background-color: #2a2a2a;
+            }
+        """)
+        header_layout.addWidget(self.settings_btn)
         
         layout.addWidget(header)
         
@@ -349,6 +215,174 @@ class MainWindow(QMainWindow):
         self.view_stack.addWidget(self.blurred_grid)
         
         layout.addWidget(self.view_stack, 1)
+        
+        # フッター（操作ボタン）
+        footer = QWidget()
+        footer.setStyleSheet("background-color: #2b2b2b; border-top: 1px solid #4a4a4a;")
+        footer_layout = QHBoxLayout(footer)
+        footer_layout.setContentsMargins(16, 10, 16, 10)
+        footer_layout.setSpacing(10)
+        
+        # 左側：スキャン・選択ボタン
+        # スキャンボタン
+        self.scan_btn = QPushButton("🔍 スキャン")
+        self.scan_btn.setObjectName("scanButton")
+        self.scan_btn.setMinimumHeight(40)
+        self.scan_btn.setMinimumWidth(120)
+        self.scan_btn.setEnabled(False)
+        self.scan_btn.setToolTip(
+            "🔍 スキャン開始\n\n"
+            "設定で指定したフォルダ内の画像をスキャンし、\n"
+            "AI (CLIP) で類似画像を検出します。\n\n"
+            "※ 初回スキャン時はAIモデルのダウンロードが必要です"
+        )
+        self.scan_btn.clicked.connect(self._on_start_scan)
+        self.scan_btn.setStyleSheet("""
+            QPushButton {
+                background-color: #27ae60;
+                color: white;
+                font-weight: bold;
+                padding: 8px 16px;
+                border-radius: 4px;
+                border: 2px solid transparent;
+            }
+            QPushButton:hover {
+                background-color: #2ecc71;
+                border: 2px solid #27ae60;
+            }
+            QPushButton:disabled {
+                background-color: #4a4a4a;
+                color: #808080;
+            }
+        """)
+        footer_layout.addWidget(self.scan_btn)
+        
+        # 中止ボタン（スキャン中のみ表示）
+        self.stop_btn = QPushButton("⏹ 中止")
+        self.stop_btn.setMinimumHeight(40)
+        self.stop_btn.setVisible(False)
+        self.stop_btn.setToolTip("⏹ スキャンを中止\n\n現在のスキャン処理を中断します。")
+        self.stop_btn.setStyleSheet("""
+            QPushButton {
+                background-color: #e74c3c;
+                color: white;
+                font-weight: bold;
+                padding: 8px 16px;
+                border-radius: 4px;
+                border: 2px solid transparent;
+            }
+            QPushButton:hover {
+                background-color: #c0392b;
+                border: 2px solid #e74c3c;
+            }
+        """)
+        self.stop_btn.clicked.connect(self._on_stop_scan)
+        footer_layout.addWidget(self.stop_btn)
+        
+        # スマート全選択ボタン
+        self.smart_select_btn = QPushButton("⚡ 全選択")
+        self.smart_select_btn.setMinimumHeight(40)
+        self.smart_select_btn.setMinimumWidth(100)
+        self.smart_select_btn.setToolTip(
+            "⚡ スマート全選択\n\n"
+            "全グループで品質スコアに基づいて自動選択します：\n"
+            "• 解像度（高い方を優先）\n"
+            "• 鮮明度（ブレが少ない方を優先）\n"
+            "• ファイルサイズ（大きい方を優先）\n\n"
+            "各グループで最良の1枚を残し、他を削除対象にします。"
+        )
+        self.smart_select_btn.setEnabled(False)
+        self.smart_select_btn.clicked.connect(self._on_smart_select_all)
+        self.smart_select_btn.setStyleSheet("""
+            QPushButton {
+                background-color: #9b59b6;
+                color: white;
+                font-weight: bold;
+                padding: 8px 16px;
+                border-radius: 4px;
+                border: 2px solid transparent;
+            }
+            QPushButton:hover {
+                background-color: #a569bd;
+                border: 2px solid #9b59b6;
+            }
+            QPushButton:disabled {
+                background-color: #4a4a4a;
+                color: #808080;
+            }
+        """)
+        footer_layout.addWidget(self.smart_select_btn)
+        
+        footer_layout.addSpacing(20)
+        
+        # 進捗表示
+        self.progress_bar = QProgressBar()
+        self.progress_bar.setVisible(False)
+        self.progress_bar.setTextVisible(False)
+        self.progress_bar.setMinimumWidth(200)
+        self.progress_bar.setMaximumWidth(300)
+        self.progress_bar.setMaximumHeight(20)
+        footer_layout.addWidget(self.progress_bar)
+        
+        self.progress_label = QLabel("")
+        self.progress_label.setStyleSheet("color: #95a5a6; font-size: 11px;")
+        footer_layout.addWidget(self.progress_label)
+        
+        footer_layout.addStretch()
+        
+        # 右側：削除関連
+        # 削除対象カウントラベル
+        self.delete_count_label = QLabel("")
+        self.delete_count_label.setStyleSheet("color: #e74c3c; font-weight: bold; font-size: 13px;")
+        footer_layout.addWidget(self.delete_count_label)
+        
+        # 削除ボタン
+        self.delete_btn = QPushButton("🗑️ 選択した画像を削除")
+        self.delete_btn.setObjectName("deleteButton")
+        self.delete_btn.setMinimumHeight(40)
+        self.delete_btn.setMinimumWidth(180)
+        self.delete_btn.setEnabled(False)
+        self.delete_btn.setToolTip(
+            "🗑️ 選択した画像を削除\n\n"
+            "選択された画像をゴミ箱に移動します。\n"
+            "（完全削除ではないので復元可能です）"
+        )
+        self.delete_btn.clicked.connect(self._on_delete_files)
+        self.delete_btn.setStyleSheet("""
+            QPushButton {
+                background-color: #e74c3c;
+                color: white;
+                font-weight: bold;
+                padding: 8px 20px;
+                border-radius: 4px;
+                border: 2px solid transparent;
+            }
+            QPushButton:hover {
+                background-color: #c0392b;
+                border: 2px solid #e74c3c;
+            }
+            QPushButton:disabled {
+                background-color: #4a4a4a;
+                color: #808080;
+            }
+        """)
+        footer_layout.addWidget(self.delete_btn)
+        
+        layout.addWidget(footer)
+        
+        # 内部で使用するダミーのコンボボックス（互換性維持）
+        self.algo_combo = QComboBox()
+        self.algo_combo.addItem("🤖 AI Semantic (CLIP)", ScanMode.AI_CLIP)
+        self.algo_combo.setVisible(False)
+        
+        # ログ表示エリア（互換性維持、非表示）
+        self.log_view = QPlainTextEdit()
+        self.log_view.setReadOnly(True)
+        self.log_view.setVisible(False)
+        
+        # 設定サマリー（互換性維持）
+        self.settings_summary = QLabel("")
+        self.settings_summary.setVisible(False)
         
         return main_widget
     
@@ -368,10 +402,6 @@ class MainWindow(QMainWindow):
                 "background-color: #4a4a4a; color: white; "
                 "font-weight: bold; padding: 8px 16px; border-radius: 4px;"
             )
-            # ボタン表示切替
-            self.smart_select_btn.setVisible(True)
-            self.select_all_blurred_btn.setVisible(False)
-            self.clear_blurred_btn.setVisible(False)
         else:  # blurred
             self.view_stack.setCurrentWidget(self.blurred_grid)
             self.view_blurred_btn.setChecked(True)
@@ -384,10 +414,6 @@ class MainWindow(QMainWindow):
                 "background-color: #4a4a4a; color: white; "
                 "font-weight: bold; padding: 8px 16px; border-radius: 4px;"
             )
-            # ボタン表示切替
-            self.smart_select_btn.setVisible(False)
-            self.select_all_blurred_btn.setVisible(True)
-            self.clear_blurred_btn.setVisible(True)
             
             # ブレ画像を表示（スキャン結果がある場合）
             if self.scan_result and hasattr(self.scan_result, 'all_images'):
@@ -425,51 +451,105 @@ class MainWindow(QMainWindow):
         self.scanner.scan_error.connect(self._on_scan_error)
         self.image_grid.files_to_delete_changed.connect(self._on_delete_count_changed)
         self.blurred_grid.files_to_delete_changed.connect(self._on_delete_count_changed)
-    
-    @Slot()
-    def _on_add_folder(self):
-        """フォルダ追加"""
-        folder = QFileDialog.getExistingDirectory(self, "スキャン対象フォルダを選択")
-        if folder:
-            path = Path(folder)
-            if path not in self.current_folders:
-                self.current_folders.append(path)
-                item = QListWidgetItem(path.name)
-                item.setToolTip(str(path))
-                item.setData(Qt.UserRole, path)
-                self.folder_list.addItem(item)
-                self.scan_btn.setEnabled(True)
-    
-    @Slot()
-    def _on_remove_folder(self):
-        """選択フォルダ削除"""
-        current = self.folder_list.currentItem()
-        if current:
-            path = current.data(Qt.UserRole)
-            if path in self.current_folders:
-                self.current_folders.remove(path)
-            self.folder_list.takeItem(self.folder_list.row(current))
-            
-            if not self.current_folders:
-                self.scan_btn.setEnabled(False)
-    
-    @Slot(int)
-    def _on_threshold_changed(self, value: int):
-        """閾値変更"""
-        self.threshold_value_label.setText(f"{value}%")
         
-        if value >= 95:
-            desc = "厳密 (ほぼ同一画像のみ)"
-        elif value >= 90:
-            desc = "やや厳密 (高い類似度)"
-        elif value >= 80:
-            desc = "標準 (同一画像の異なるバージョン)"
-        elif value >= 70:
-            desc = "緩い (類似した構図)"
+        # プレビュー関連
+        self.image_grid.image_selected.connect(self._on_image_selected)
+        self.blurred_grid.image_selected.connect(self._on_image_selected)
+        
+        # プレビューパネルからの操作
+        self.preview_panel.mark_for_deletion.connect(self._on_preview_mark_delete)
+        self.preview_panel.unmark_for_deletion.connect(self._on_preview_unmark_delete)
+    
+    @Slot(object)
+    def _on_image_selected(self, image_info):
+        """画像が選択されたときにプレビューを表示"""
+        # 現在の削除状態を確認する必要があるが、
+        # ImageInfoオブジェクト自体には削除フラグは持たせていない（UI側で管理）
+        # なので、とりあえず画像情報を表示し、削除状態はFalse（初期値）としておく
+        # ※本来はGrid側から削除状態も送るのがベストだが、今回は簡易実装
+        
+        # 削除状態を確認するために、現在のビューから検索するのはコストが高い
+        # ここではシンプルに画像情報を表示する
+        
+        info = {
+            'width': image_info.width,
+            'height': image_info.height,
+            'file_size': image_info.file_size,
+            'sharpness_score': image_info.sharpness_score,
+            'is_marked': False  # 初期値。後でUIの状態と同期させるのは少し複雑
+        }
+        
+        # Grid側で管理している削除状態を取得できればよいが...
+        # ここでは「画像選択」だけなので、とりあえず表示する
+        self.preview_panel.show_image(image_info.path, info)
+
+    @Slot(Path)
+    def _on_preview_mark_delete(self, path: Path):
+        """プレビューパネルで削除マークされた"""
+        # TODO: Grid側の該当画像のチェックボックスをONにする連携が必要
+        # 現状のアーキテクチャでは逆方向（Main -> Grid内の特定カード）へのアクセスが難しい
+        # 今回はメッセージだけ表示しておく
+        pass
+
+    @Slot(Path)
+    def _on_preview_unmark_delete(self, path: Path):
+        """プレビューパネルで削除マークが外された"""
+        pass
+    
+    @Slot()
+    def _on_open_settings(self):
+        """設定ダイアログを開く"""
+        dialog = SettingsDialog(
+            parent=self,
+            current_folders=self.current_folders,
+            current_threshold=self.current_threshold,
+            db=self.scanner.db
+        )
+        dialog.settings_applied.connect(self._on_settings_applied)
+        dialog.cache_cleared.connect(self._on_cache_cleared)
+        dialog.exec()
+    
+    @Slot(list, int)
+    def _on_settings_applied(self, folders: list, threshold: int):
+        """設定が適用されたときの処理"""
+        self.current_folders = folders
+        self.current_threshold = threshold
+        
+        # スキャンボタンの有効/無効を更新
+        self.scan_btn.setEnabled(len(self.current_folders) > 0)
+        
+        # 設定サマリーを更新
+        self._update_settings_summary()
+        
+        logger.info(f"Settings applied: {len(folders)} folders, threshold={threshold}%")
+    
+    @Slot()
+    def _on_cache_cleared(self):
+        """キャッシュがクリアされたときの処理"""
+        self.progress_label.setText("キャッシュを削除しました")
+    
+    def _update_settings_summary(self):
+        """設定サマリーを更新"""
+        if not self.current_folders:
+            self.settings_summary.setText("📁 フォルダ未設定\n⚙️ 設定ボタンから追加してください")
+            self.settings_summary.setStyleSheet(
+                "color: #e74c3c; font-size: 11px; padding: 8px; "
+                "background-color: #1e1e1e; border-radius: 4px;"
+            )
         else:
-            desc = "非常に緩い (要注意)"
-        
-        self.threshold_desc.setText(desc)
+            folder_names = [f.name for f in self.current_folders[:3]]
+            folder_text = ", ".join(folder_names)
+            if len(self.current_folders) > 3:
+                folder_text += f" 他{len(self.current_folders) - 3}件"
+            
+            self.settings_summary.setText(
+                f"📁 {folder_text}\n"
+                f"🎚️ 類似度閾値: {self.current_threshold}%"
+            )
+            self.settings_summary.setStyleSheet(
+                "color: #2ecc71; font-size: 11px; padding: 8px; "
+                "background-color: #1e1e1e; border-radius: 4px;"
+            )
     
     @Slot(int)
     def _on_algorithm_changed(self, index: int):
@@ -609,8 +689,7 @@ class MainWindow(QMainWindow):
         self.scan_btn.setEnabled(False)
         self.scan_btn.setVisible(False)
         self.stop_btn.setVisible(True)
-        self.add_folder_btn.setEnabled(False)
-        self.remove_folder_btn.setEnabled(False)
+        self.settings_btn.setEnabled(False)  # スキャン中は設定変更不可
         self.algo_combo.setEnabled(False)
         self.delete_btn.setEnabled(False)
         self.smart_select_btn.setEnabled(False)
@@ -618,7 +697,7 @@ class MainWindow(QMainWindow):
         self.progress_bar.setVisible(True)
         self.progress_bar.setValue(0)
         
-        threshold = self.threshold_slider.value()
+        threshold = self.current_threshold
         mode = self.algo_combo.currentData()
         
         # 最初のフォルダをスキャン
@@ -649,8 +728,7 @@ class MainWindow(QMainWindow):
         self.scan_btn.setVisible(True)
         self.stop_btn.setVisible(False)
         self.stop_btn.setEnabled(True)
-        self.add_folder_btn.setEnabled(True)
-        self.remove_folder_btn.setEnabled(True)
+        self.settings_btn.setEnabled(True)
         self.algo_combo.setEnabled(True)
         self.progress_bar.setVisible(False)
         
@@ -681,8 +759,7 @@ class MainWindow(QMainWindow):
         self.scan_btn.setVisible(True)
         self.stop_btn.setVisible(False)
         self.stop_btn.setEnabled(True)
-        self.add_folder_btn.setEnabled(True)
-        self.remove_folder_btn.setEnabled(True)
+        self.settings_btn.setEnabled(True)
         self.algo_combo.setEnabled(True)
         self.progress_bar.setVisible(False)
         self.progress_label.setText(f"エラー: {error}")

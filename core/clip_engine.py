@@ -204,9 +204,11 @@ class CLIPEngine:
         return Path(__file__).parent / "clip_worker.py"
     
     def _start_worker(self, progress_callback=None) -> bool:
-        """ワーカープロセスを起動"""
+        """ワーカープロセスを起動（タイムアウト付き）"""
         import subprocess
         import json
+        import threading
+        import queue
         
         if self._worker_process is not None and self._worker_process.poll() is None:
             # すでに起動中
@@ -214,6 +216,8 @@ class CLIPEngine:
         
         python_exe = find_python_executable()
         worker_script = self._get_worker_script_path()
+        
+        logger.info(f"Starting worker: python={python_exe}, script={worker_script}")
         
         if not worker_script.exists():
             logger.error(f"Worker script not found: {worker_script}")
@@ -225,6 +229,10 @@ class CLIPEngine:
             
             creationflags = subprocess.CREATE_NO_WINDOW if os.name == 'nt' else 0
             
+            # 環境変数を設定（AIライブラリのパスを含める）
+            env = os.environ.copy()
+            env['PYTHONPATH'] = str(AI_ENV_PATH) + os.pathsep + env.get('PYTHONPATH', '')
+            
             self._worker_process = subprocess.Popen(
                 [python_exe, str(worker_script)],
                 stdin=subprocess.PIPE,
@@ -232,33 +240,109 @@ class CLIPEngine:
                 stderr=subprocess.PIPE,
                 text=True,
                 bufsize=1,
-                creationflags=creationflags
+                creationflags=creationflags,
+                env=env
             )
             
-            # モデル読み込み完了を待つ
+            logger.info(f"Worker process started with PID: {self._worker_process.pid}")
+            
+            # モデル読み込み完了を待つ（タイムアウト付き）
             if progress_callback:
                 progress_callback("AIモデルを読み込み中...")
             
+            # 非同期読み取り用のキュー
+            output_queue = queue.Queue()
+            
+            def read_output():
+                """ワーカーの出力を読み取るスレッド"""
+                try:
+                    while True:
+                        line = self._worker_process.stdout.readline()
+                        if line:
+                            output_queue.put(('stdout', line))
+                        else:
+                            break
+                except Exception as e:
+                    output_queue.put(('error', str(e)))
+            
+            def read_stderr():
+                """ワーカーのエラー出力を読み取るスレッド"""
+                try:
+                    while True:
+                        line = self._worker_process.stderr.readline()
+                        if line:
+                            output_queue.put(('stderr', line))
+                            logger.debug(f"Worker stderr: {line.strip()}")
+                        else:
+                            break
+                except Exception:
+                    pass
+            
+            # 読み取りスレッドを開始
+            stdout_thread = threading.Thread(target=read_output, daemon=True)
+            stderr_thread = threading.Thread(target=read_stderr, daemon=True)
+            stdout_thread.start()
+            stderr_thread.start()
+            
+            # タイムアウト付きで待機（最大5分）
+            timeout_seconds = 300
+            start_time = __import__('time').time()
+            
             while True:
-                line = self._worker_process.stdout.readline()
-                if not line:
-                    stderr = self._worker_process.stderr.read()
-                    logger.error(f"Worker terminated unexpectedly: {stderr}")
+                elapsed = __import__('time').time() - start_time
+                if elapsed > timeout_seconds:
+                    logger.error(f"Worker startup timed out after {timeout_seconds}s")
+                    self._worker_process.kill()
                     return False
+                
+                # プロセスが終了していないかチェック
+                if self._worker_process.poll() is not None:
+                    # プロセスが終了した
+                    stderr_output = []
+                    while not output_queue.empty():
+                        try:
+                            msg_type, msg = output_queue.get_nowait()
+                            if msg_type == 'stderr':
+                                stderr_output.append(msg)
+                        except queue.Empty:
+                            break
+                    logger.error(f"Worker terminated unexpectedly: {''.join(stderr_output)}")
+                    return False
+                
+                try:
+                    msg_type, line = output_queue.get(timeout=1.0)
+                except queue.Empty:
+                    # 進捗表示を更新
+                    remaining = int(timeout_seconds - elapsed)
+                    if progress_callback and remaining % 10 == 0:
+                        progress_callback(f"AIモデルを読み込み中... (残り{remaining}秒)")
+                    continue
+                
+                if msg_type == 'error':
+                    logger.error(f"Read error: {line}")
+                    return False
+                
+                if msg_type == 'stderr':
+                    continue
                 
                 try:
                     data = json.loads(line.strip())
                     status = data.get("status")
                     
                     if status == "loading":
-                        logger.info(data.get("message", "Loading..."))
+                        msg = data.get("message", "Loading...")
+                        logger.info(msg)
+                        if progress_callback:
+                            progress_callback(msg)
                     elif status == "ready":
                         self.device = data.get("device", "cpu")
                         logger.info(f"CLIP worker ready on {self.device}")
                         self._worker_ready = True
                         return True
                     elif status == "fatal":
-                        logger.error(f"Worker fatal error: {data.get('error')}")
+                        error_msg = data.get('error', 'Unknown error')
+                        traceback_info = data.get('traceback', '')
+                        logger.error(f"Worker fatal error: {error_msg}\n{traceback_info}")
                         return False
                 except json.JSONDecodeError:
                     logger.warning(f"Invalid JSON from worker: {line}")
@@ -266,6 +350,8 @@ class CLIPEngine:
                     
         except Exception as e:
             logger.error(f"Failed to start worker: {e}")
+            import traceback
+            logger.debug(traceback.format_exc())
             return False
     
     def _stop_worker(self):

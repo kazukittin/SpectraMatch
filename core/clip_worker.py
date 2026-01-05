@@ -16,19 +16,69 @@ sys.path.insert(0, str(AI_ENV_PATH))
 
 def main():
     """メイン処理: stdinから画像パスを受け取り、特徴ベクトルを返す"""
-    import numpy as np
-    import torch
-    from PIL import Image
-    from transformers import CLIPProcessor, CLIPModel
+    import os
+    
+    # 環境情報をログ出力（デバッグ用）
+    print(json.dumps({
+        "status": "loading", 
+        "message": "Initializing worker...",
+        "python_version": sys.version,
+        "cwd": os.getcwd()
+    }), flush=True)
+    
+    try:
+        import numpy as np
+        print(json.dumps({"status": "loading", "message": "numpy loaded"}), flush=True)
+    except ImportError as e:
+        print(json.dumps({"status": "fatal", "error": f"Failed to import numpy: {e}"}), flush=True)
+        return
+    
+    try:
+        import torch
+        print(json.dumps({
+            "status": "loading", 
+            "message": f"torch loaded (version: {torch.__version__})"
+        }), flush=True)
+    except ImportError as e:
+        print(json.dumps({"status": "fatal", "error": f"Failed to import torch: {e}"}), flush=True)
+        return
+    
+    try:
+        from PIL import Image
+        print(json.dumps({"status": "loading", "message": "PIL loaded"}), flush=True)
+    except ImportError as e:
+        print(json.dumps({"status": "fatal", "error": f"Failed to import PIL: {e}"}), flush=True)
+        return
+    
+    try:
+        from transformers import CLIPProcessor, CLIPModel
+        print(json.dumps({"status": "loading", "message": "transformers loaded"}), flush=True)
+    except ImportError as e:
+        print(json.dumps({"status": "fatal", "error": f"Failed to import transformers: {e}"}), flush=True)
+        return
     
     model_name = "openai/clip-vit-base-patch32"
     device = "cuda" if torch.cuda.is_available() else "cpu"
     
-    # モデルを1回だけ読み込む
-    print(json.dumps({"status": "loading", "message": "Loading CLIP model..."}), flush=True)
-    model = CLIPModel.from_pretrained(model_name).to(device)
-    processor = CLIPProcessor.from_pretrained(model_name)
-    print(json.dumps({"status": "ready", "device": device}), flush=True)
+    print(json.dumps({
+        "status": "loading", 
+        "message": f"Loading CLIP model on {device}..."
+    }), flush=True)
+    
+    try:
+        model = CLIPModel.from_pretrained(model_name).to(device)
+        print(json.dumps({"status": "loading", "message": "CLIP model loaded, loading processor..."}), flush=True)
+        
+        processor = CLIPProcessor.from_pretrained(model_name)
+        print(json.dumps({"status": "ready", "device": device}), flush=True)
+    except Exception as e:
+        import traceback
+        print(json.dumps({
+            "status": "fatal", 
+            "error": f"Failed to load CLIP model: {e}",
+            "traceback": traceback.format_exc()
+        }), flush=True)
+        return
     
     # stdinから画像パスを1行ずつ受け取って処理
     for line in sys.stdin:
