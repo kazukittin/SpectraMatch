@@ -22,8 +22,7 @@ hiddenimports = [
 
 # 3. 除外モジュール（ここで AIライブラリを明示的に除外）
 excludes = [
-    'torch', 'transformers', 'tokenizers', 'huggingface_hub', 
-    'safetensors', 'intel_openmp', 'matplotlib', 'tkinter'
+    'matplotlib', 'tkinter', 'IPython', 'jupyter'
 ]
 
 a = Analysis(

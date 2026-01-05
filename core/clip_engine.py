@@ -26,15 +26,86 @@ def find_python_executable() -> str:
     """システムのPython実行ファイルのパスを見つける"""
     if not getattr(sys, 'frozen', False):
         return sys.executable
+        
+    # 1. PATHから検索
     for cmd in ["python", "python3", "py"]:
         path = shutil.which(cmd)
         if path: return path
-    return sys.executable
+    
+    # 2. Windows レジストリから検索
+    if os.name == 'nt':
+        try:
+            import winreg
+            # PythonCore (Official)
+            access_registry = winreg.ConnectRegistry(None, winreg.HKEY_LOCAL_MACHINE)
+            try:
+                key = winreg.OpenKey(access_registry, r"SOFTWARE\Python\PythonCore")
+                # 最新バージョンを探す
+                vers = []
+                i = 0
+                while True:
+                    try:
+                        vers.append(winreg.EnumKey(key, i))
+                        i += 1
+                    except OSError:
+                        break
+                if vers:
+                    vers.sort(key=lambda s: [int(x) for x in s.split('.') if x.isdigit()], reverse=True)
+                    latest = vers[0]
+                    with winreg.OpenKey(key, f"{latest}\\InstallPath") as path_key:
+                        install_path = winreg.QueryValue(path_key, None)
+                        exe_path = os.path.join(install_path, "python.exe")
+                        if os.path.exists(exe_path):
+                            return exe_path
+            except OSError:
+                pass
+                
+            # CurrentUserも確認
+            access_registry = winreg.ConnectRegistry(None, winreg.HKEY_CURRENT_USER)
+            try:
+                key = winreg.OpenKey(access_registry, r"SOFTWARE\Python\PythonCore")
+                vers = []
+                i = 0
+                while True:
+                    try:
+                        vers.append(winreg.EnumKey(key, i))
+                        i += 1
+                    except OSError:
+                        break
+                if vers:
+                    vers.sort(key=lambda s: [int(x) for x in s.split('.') if x.isdigit()], reverse=True)
+                    latest = vers[0]
+                    with winreg.OpenKey(key, f"{latest}\\InstallPath") as path_key:
+                        install_path = winreg.QueryValue(path_key, None)
+                        exe_path = os.path.join(install_path, "python.exe")
+                        if os.path.exists(exe_path):
+                            return exe_path
+            except OSError:
+                pass
+        except Exception as e:
+            logger.debug(f"Registry lookup failed: {e}")
+
+    # 3. 一般的なインストールパスを確認 (ユーザープロファイルなど)
+    common_paths = [
+        os.path.expandvars(r"%LOCALAPPDATA%\Programs\Python\Python310\python.exe"),
+        os.path.expandvars(r"%LOCALAPPDATA%\Programs\Python\Python311\python.exe"),
+        os.path.expandvars(r"%LOCALAPPDATA%\Programs\Python\Python312\python.exe"),
+        os.path.expandvars(r"%LOCALAPPDATA%\Programs\Python\Python39\python.exe"),
+        r"C:\Python310\python.exe",
+        r"C:\Python311\python.exe",
+        r"C:\Python312\python.exe",
+    ]
+    for p in common_paths:
+        if os.path.exists(p):
+            return p
+
+    # 見つからない場合、Noneを返す（sys.executableを返すと無限ループになるため）
+    return None
 
 def get_install_command() -> List[str]:
     """インストール用のコマンド引数リストを返す"""
     AI_ENV_PATH.mkdir(parents=True, exist_ok=True)
-    python_exe = find_python_executable()
+    python_exe = find_python_executable() or "python"
     return [
         python_exe, "-m", "pip", "install",
         "torch", "transformers", "pillow", "numpy",
@@ -76,10 +147,14 @@ def _check_ai_via_subprocess() -> bool:
     import subprocess
     
     python_exe = find_python_executable()
-    if python_exe == sys.executable:
+    if python_exe is None:
         # システムPythonが見つからない場合はディスクチェックにフォールバック
         logger.warning("System Python not found, falling back to disk check")
         return is_ai_installed_on_disk()
+    
+    if python_exe == sys.executable and getattr(sys, 'frozen', False):
+         # Should not happen with new logic, but safe guard
+         return is_ai_installed_on_disk()
     
     # Pythonスクリプトでインポートテスト
     test_script = f'''
@@ -215,6 +290,12 @@ class CLIPEngine:
             return self._worker_ready
         
         python_exe = find_python_executable()
+        if not python_exe:
+            msg = "System Python not found. Please install Python 3.9+."
+            logger.error(msg)
+            if progress_callback: progress_callback(f"エラー: {msg}")
+            return False
+
         worker_script = self._get_worker_script_path()
         
         logger.info(f"Starting worker: python={python_exe}, script={worker_script}")
