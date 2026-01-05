@@ -327,6 +327,8 @@ class ImageCard(QFrame):
         self.is_marked_delete = delete
         self.image_info.is_marked_delete = delete
         self._update_style()
+        # 手動でシグナルを発行してmarked_pathsを更新
+        self.selection_changed.emit(self.image_info, self.is_marked_delete)
     
     def mousePressEvent(self, event):
         """シングルクリックでプレビュー表示"""
@@ -1075,6 +1077,8 @@ class BlurredImageCard(QFrame):
         self.is_marked_delete = delete
         self.image_info.is_marked_delete = delete
         self._update_style()
+        # 手動でシグナルを発行してmarked_pathsを更新
+        self.selection_changed.emit(self.image_info, self.is_marked_delete)
     
     def mousePressEvent(self, event):
         """シングルクリックでプレビュー表示"""
