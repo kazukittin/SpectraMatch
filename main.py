@@ -73,6 +73,15 @@ def main():
 
 import multiprocessing
 
+def handle_exception(exc_type, exc_value, exc_traceback):
+    """未処理の例外をログに記録する"""
+    if issubclass(exc_type, KeyboardInterrupt):
+        sys.__excepthook__(exc_type, exc_value, exc_traceback)
+        return
+    logging.error("Uncaught exception", exc_info=(exc_type, exc_value, exc_traceback))
+
 if __name__ == "__main__":
     multiprocessing.freeze_support()
+    # グローバル例外フックを設定
+    sys.excepthook = handle_exception
     main()

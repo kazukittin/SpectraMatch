@@ -223,7 +223,9 @@ class ImageScanner(QObject):
             
             # Phase 1: ファイル探索
             self.progress_updated.emit(0, 0, "画像ファイルを検索中...")
+            logger.info(f"Scanning for images in: {folder_path} (recursive={recursive})")
             image_files = self._find_image_files(folder_path, recursive)
+            logger.info(f"Found {len(image_files)} images.")
             result.total_files = len(image_files)
             
             if result.total_files == 0:
@@ -237,6 +239,7 @@ class ImageScanner(QObject):
             
             # Phase 2: 増分スキャン（キャッシュ確認 + 削除検知）
             self.progress_updated.emit(0, result.total_files, "キャッシュを確認中...")
+            logger.info("Checking cache and database...")
             
             files_to_process: List[Path] = []
             cached_count = 0
@@ -278,6 +281,7 @@ class ImageScanner(QObject):
                 cached_count, result.total_files,
                 f"キャッシュ: {cached_count}件, 処理対象: {len(files_to_process)}件"
             )
+            logger.info(f"Cache check complete. Cached: {cached_count}, To process: {len(files_to_process)}")
             
             if self._stop_event.is_set():
                 self.scan_completed.emit(result)
@@ -288,6 +292,8 @@ class ImageScanner(QObject):
             processed = cached_count
             batch_records: List[Dict] = []
             BATCH_SIZE = 100
+            
+            logger.info("Starting processing loop...")
             
             CLIP_BATCH_SIZE = 32  # RTX4060に最適化
             
@@ -300,7 +306,8 @@ class ImageScanner(QObject):
                 
                 # ファイル情報を先に取得
                 file_infos = []
-                for path in batch_paths:
+                for i, path in enumerate(batch_paths):
+                    logger.info(f"Processing file {i+1}/{len(batch_paths)}: {path}")
                     try:
                         stat = path.stat()
                         sharpness, width, height = self.hasher.compute_sharpness(path)
@@ -316,9 +323,15 @@ class ImageScanner(QObject):
                         logger.error(f"ファイル情報取得エラー: {path} - {e}")
                         file_infos.append(None)
                 
+                logger.info(f"Batch pre-processing complete. Valid files: {len([f for f in file_infos if f])}")
+
                 # バッチでCLIP埋め込みを抽出
                 valid_paths = [info['path'] for info in file_infos if info is not None]
-                embeddings = self.clip_engine.extract_embeddings_batch(valid_paths, batch_size=CLIP_BATCH_SIZE)
+                if valid_paths:
+                    logger.info(f"Extracting embeddings for {len(valid_paths)} files...")
+                    embeddings = self.clip_engine.extract_embeddings_batch(valid_paths, batch_size=CLIP_BATCH_SIZE)
+                else:
+                    embeddings = []
                 
                 # 結果をマージ
                 embed_idx = 0

@@ -14,6 +14,11 @@ from pathlib import Path
 AI_ENV_PATH = Path.home() / ".spectramatch" / "ai_libs"
 sys.path.insert(0, str(AI_ENV_PATH))
 
+# Windowsで標準入出力をUTF-8に強制（日本語パス対策）
+if sys.platform == "win32":
+    sys.stdin.reconfigure(encoding='utf-8')
+    sys.stdout.reconfigure(encoding='utf-8')
+
 def main():
     """メイン処理: stdinから画像パスを受け取り、特徴ベクトルを返す"""
     import os
@@ -81,8 +86,18 @@ def main():
         return
     
     # stdinから画像パスを1行ずつ受け取って処理
-    for line in sys.stdin:
+    while True:
+        try:
+            line = sys.stdin.readline()
+        except Exception as e:
+            print(json.dumps({"status": "fatal", "error": f"stdin read error: {e}"}), flush=True)
+            break
+        
+        if not line:  # EOF
+            break
+        
         line = line.strip()
+        # print(json.dumps({"status": "debug", "message": f"Received: {line}"}), flush=True)
         if not line:
             continue
         

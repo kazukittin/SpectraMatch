@@ -51,7 +51,6 @@ exe = EXE(
     name='SpectraMatch',
     debug=False,
     bootloader_ignore_signals=False,
-    strip=False,
     upx=True,
     console=False,
     disable_windowed_traceback=False,

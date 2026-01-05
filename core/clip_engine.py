@@ -282,8 +282,8 @@ class CLIPEngine:
         """ワーカープロセスを起動（タイムアウト付き）"""
         import subprocess
         import json
+        import time
         import threading
-        import queue
         
         if self._worker_process is not None and self._worker_process.poll() is None:
             # すでに起動中
@@ -322,7 +322,8 @@ class CLIPEngine:
                 text=True,
                 bufsize=1,
                 creationflags=creationflags,
-                env=env
+                env=env,
+                encoding='utf-8'
             )
             
             logger.info(f"Worker process started with PID: {self._worker_process.pid}")
@@ -331,46 +332,25 @@ class CLIPEngine:
             if progress_callback:
                 progress_callback("AIモデルを読み込み中...")
             
-            # 非同期読み取り用のキュー
-            output_queue = queue.Queue()
-            
-            def read_output():
-                """ワーカーの出力を読み取るスレッド"""
-                try:
-                    while True:
-                        line = self._worker_process.stdout.readline()
-                        if line:
-                            output_queue.put(('stdout', line))
-                        else:
-                            break
-                except Exception as e:
-                    output_queue.put(('error', str(e)))
-            
+            # stderrを別スレッドで読み取り（デッドロック防止）
+            self._stderr_lines = []
             def read_stderr():
-                """ワーカーのエラー出力を読み取るスレッド"""
                 try:
-                    while True:
-                        line = self._worker_process.stderr.readline()
-                        if line:
-                            output_queue.put(('stderr', line))
-                            logger.debug(f"Worker stderr: {line.strip()}")
-                        else:
-                            break
-                except Exception:
+                    for line in self._worker_process.stderr:
+                        self._stderr_lines.append(line)
+                        logger.debug(f"Worker stderr: {line.strip()}")
+                except:
                     pass
             
-            # 読み取りスレッドを開始
-            stdout_thread = threading.Thread(target=read_output, daemon=True)
             stderr_thread = threading.Thread(target=read_stderr, daemon=True)
-            stdout_thread.start()
             stderr_thread.start()
             
-            # タイムアウト付きで待機（最大5分）
+            # タイムアウト付きで同期的にstdoutを読む
             timeout_seconds = 300
-            start_time = __import__('time').time()
+            start_time = time.time()
             
             while True:
-                elapsed = __import__('time').time() - start_time
+                elapsed = time.time() - start_time
                 if elapsed > timeout_seconds:
                     logger.error(f"Worker startup timed out after {timeout_seconds}s")
                     self._worker_process.kill()
@@ -378,33 +358,14 @@ class CLIPEngine:
                 
                 # プロセスが終了していないかチェック
                 if self._worker_process.poll() is not None:
-                    # プロセスが終了した
-                    stderr_output = []
-                    while not output_queue.empty():
-                        try:
-                            msg_type, msg = output_queue.get_nowait()
-                            if msg_type == 'stderr':
-                                stderr_output.append(msg)
-                        except queue.Empty:
-                            break
-                    logger.error(f"Worker terminated unexpectedly: {''.join(stderr_output)}")
+                    logger.error(f"Worker terminated unexpectedly. stderr: {''.join(self._stderr_lines)}")
                     return False
                 
-                try:
-                    msg_type, line = output_queue.get(timeout=1.0)
-                except queue.Empty:
-                    # 進捗表示を更新
-                    remaining = int(timeout_seconds - elapsed)
-                    if progress_callback and remaining % 10 == 0:
-                        progress_callback(f"AIモデルを読み込み中... (残り{remaining}秒)")
-                    continue
-                
-                if msg_type == 'error':
-                    logger.error(f"Read error: {line}")
+                # stdoutから1行読む（ブロッキング）
+                line = self._worker_process.stdout.readline()
+                if not line:
+                    logger.error("Worker stdout closed unexpectedly")
                     return False
-                
-                if msg_type == 'stderr':
-                    continue
                 
                 try:
                     data = json.loads(line.strip())
@@ -497,15 +458,26 @@ class CLIPEngine:
             if not self._start_worker():
                 return None
         
+        # ワーカー生存確認
+        if self._worker_process.poll() is not None:
+            logger.error(f"Worker process died unexpectedly with code {self._worker_process.poll()}")
+            self._worker_ready = False
+            return None
+
         try:
             # 画像パスをワーカーに送信
+            logger.info(f"Sending request to worker: {image_path}")
             self._worker_process.stdin.write(f"{image_path}\n")
             self._worker_process.stdin.flush()
             
             # 結果を受信
+            logger.info("Waiting for worker response...")
             line = self._worker_process.stdout.readline()
             if not line:
-                logger.error("Worker returned empty response")
+                logger.error("Worker returned empty response (EOF). Worker might have crashed.")
+                # stderrを少し読んでみる
+                err_preview = self._worker_process.stderr.read(1024) if self._worker_process.stderr else "No stderr"
+                logger.error(f"Worker stderr preview: {err_preview}")
                 self._worker_ready = False
                 return None
             
