@@ -168,7 +168,8 @@ class ImageCard(QFrame):
     def __init__(self, image_info: ImageInfo, parent=None):
         super().__init__(parent)
         self.image_info = image_info
-        self.is_marked_delete = False
+        # ImageInfoから状態を復元
+        self.is_marked_delete = getattr(self.image_info, 'is_marked_delete', False)
         self.is_focused = False
         self._thumbnail_loaded = False
         self._setup_ui()
@@ -244,6 +245,7 @@ class ImageCard(QFrame):
         # 削除チェックボックス
         self.delete_checkbox = QCheckBox("削除対象")
         self.delete_checkbox.setStyleSheet("font-size: 11px; margin-top: 4px;")
+        self.delete_checkbox.setChecked(self.is_marked_delete)
         self.delete_checkbox.stateChanged.connect(self._on_checkbox_changed)
         layout.addWidget(self.delete_checkbox, alignment=Qt.AlignCenter)
     
@@ -277,6 +279,7 @@ class ImageCard(QFrame):
     def _on_checkbox_changed(self, state):
         # PySide6のstateChangedは整数を送信 (Checked=2, Unchecked=0)
         self.is_marked_delete = (state == Qt.CheckState.Checked.value)
+        self.image_info.is_marked_delete = self.is_marked_delete
         self._update_style()
         self.selection_changed.emit(self.image_info, self.is_marked_delete)
     
@@ -322,6 +325,7 @@ class ImageCard(QFrame):
         self.delete_checkbox.setChecked(delete)
         self.delete_checkbox.blockSignals(False)
         self.is_marked_delete = delete
+        self.image_info.is_marked_delete = delete
         self._update_style()
     
     def mousePressEvent(self, event):
@@ -478,6 +482,7 @@ class ImageGridWidget(QScrollArea):
     
     def __init__(self, parent=None):
         super().__init__(parent)
+        self.last_focused_path = None
         self.group_widgets: List[SimilarityGroupWidget] = []
         self.all_groups: List[SimilarityGroup] = []
         self.current_page = 0
@@ -672,6 +677,10 @@ class ImageGridWidget(QScrollArea):
         
         self.layout.addStretch()
         
+        # フォーカス復元
+        if self.last_focused_path:
+            self._restore_focus()
+        
         # スクロールを先頭に
         self.verticalScrollBar().setValue(0)
     
@@ -768,6 +777,16 @@ class ImageGridWidget(QScrollArea):
         
         return removed_groups
     
+    def _restore_focus(self):
+        """保存されたパスの画像にフォーカスを戻す"""
+        cards = self._get_all_cards()
+        for i, card in enumerate(cards):
+            if card.image_info.path == self.last_focused_path:
+                 self._focus_index = i
+                 card.set_focused(True)
+                 self.image_selected.emit(card.image_info)
+                 self.ensureWidgetVisible(card)
+                 return
     def _get_all_cards(self) -> List[ImageCard]:
         """現在のページの全カードを取得"""
         cards = []
@@ -788,9 +807,14 @@ class ImageGridWidget(QScrollArea):
         # インデックスを進める
         self._focus_index += 1
         if self._focus_index >= len(cards):
-            # 次のページへ？とりあえずループさせたりせず止めるか、ページ送り機能を実装するか
-            # ここでは現在のページの最後までいったら止める
-            self._focus_index = len(cards) - 1
+            # 次のページへ
+            if self.current_page < self.total_pages - 1:
+                self._go_next_page()
+                self._focus_index = 0
+                # ページが切り替わったので、新しいページのカードリストを再取得
+                cards = self._get_all_cards() 
+            else:
+                self._focus_index = len(cards) - 1
         
         self._update_focus(cards)
     
@@ -807,7 +831,14 @@ class ImageGridWidget(QScrollArea):
         # インデックスを戻す
         self._focus_index -= 1
         if self._focus_index < 0:
-            self._focus_index = 0
+            # 前のページへ
+            if self.current_page > 0:
+                self._go_prev_page()
+                # 新しいページのカード数を取得して最後のインデックスに設定
+                cards = self._get_all_cards() # ページが切り替わったので、新しいページのカードリストを再取得
+                self._focus_index = len(cards) - 1
+            else:
+                self._focus_index = 0
         
         self._update_focus(cards)
     
@@ -818,6 +849,7 @@ class ImageGridWidget(QScrollArea):
         
         card = cards[self._focus_index]
         card.set_focused(True)
+        self.last_focused_path = card.image_info.path
         self.image_selected.emit(card.image_info)
         
         # 表示領域に入るようにスクロール
@@ -845,7 +877,33 @@ class ImageGridWidget(QScrollArea):
                 card.set_focused(True)
                 break
         
+        self.last_focused_path = image_info.path
         self.image_selected.emit(image_info)
+    
+    def toggle_current_image_selection(self):
+        """現在のフォーカス画像のチェックをトグル"""
+        cards = self._get_all_cards()
+        if 0 <= self._focus_index < len(cards):
+            card = cards[self._focus_index]
+            card.set_delete(not card.is_marked_delete)
+    
+    def keyPressEvent(self, event):
+        """キーイベント処理"""
+        # Spaceキーでチェック切り替え
+        if event.key() == Qt.Key_Space:
+            self.toggle_current_image_selection()
+            event.accept()
+            return
+        elif event.key() == Qt.Key_Right:
+            self.select_next_image()
+            event.accept()
+            return
+        elif event.key() == Qt.Key_Left:
+            self.select_prev_image()
+            event.accept()
+            return
+            
+        super().keyPressEvent(event)
 
 
 class BlurredImageCard(QFrame):
@@ -859,7 +917,8 @@ class BlurredImageCard(QFrame):
         super().__init__(parent)
         self.image_info = image_info
         self.rank = rank  # 順位
-        self.is_marked_delete = False
+        # ImageInfoから状態を復元
+        self.is_marked_delete = getattr(self.image_info, 'is_marked_delete', False)
         self.is_focused = False
 
         self._thumbnail_loaded = False
@@ -928,6 +987,7 @@ class BlurredImageCard(QFrame):
         # 削除チェックボックス
         self.delete_checkbox = QCheckBox("削除対象")
         self.delete_checkbox.setStyleSheet("font-size: 11px; margin-top: 4px;")
+        self.delete_checkbox.setChecked(self.is_marked_delete)
         self.delete_checkbox.stateChanged.connect(self._on_checkbox_changed)
         layout.addWidget(self.delete_checkbox, alignment=Qt.AlignCenter)
     
@@ -958,6 +1018,7 @@ class BlurredImageCard(QFrame):
     def _on_checkbox_changed(self, state):
         # PySide6のstateChangedは整数を送信 (Checked=2, Unchecked=0)
         self.is_marked_delete = (state == Qt.CheckState.Checked.value)
+        self.image_info.is_marked_delete = self.is_marked_delete
         self._update_style()
         self.selection_changed.emit(self.image_info, self.is_marked_delete)
     
@@ -999,6 +1060,7 @@ class BlurredImageCard(QFrame):
         self.delete_checkbox.setChecked(delete)
         self.delete_checkbox.blockSignals(False)
         self.is_marked_delete = delete
+        self.image_info.is_marked_delete = delete
         self._update_style()
     
     def mousePressEvent(self, event):
@@ -1029,6 +1091,7 @@ class BlurredImagesGridWidget(QScrollArea):
     
     def __init__(self, parent=None):
         super().__init__(parent)
+        self.last_focused_path = None
         self.cards: List[BlurredImageCard] = []
         self.all_images: List[ImageInfo] = []
         self.current_page = 0
@@ -1229,6 +1292,9 @@ class BlurredImagesGridWidget(QScrollArea):
         
         self.layout.addStretch()
         
+        if self.last_focused_path:
+            self._restore_focus()
+        
         self.verticalScrollBar().setValue(0)
     
     def clear(self):
@@ -1293,12 +1359,14 @@ class BlurredImagesGridWidget(QScrollArea):
             deleted_paths: 削除されたファイルパスのリスト
         """
         deleted_paths_set = {str(p) for p in deleted_paths}
+        old_count = len(self.all_images)
         
         # all_imagesから削除されたファイルを除去
         self.all_images = [
             img for img in self.all_images 
             if str(img.path) not in deleted_paths_set
         ]
+        removed_count = old_count - len(self.all_images)
         
         # ページ数を再計算
         if self.all_images:
@@ -1327,7 +1395,11 @@ class BlurredImagesGridWidget(QScrollArea):
         # インデックスを進める
         self._focus_index += 1
         if self._focus_index >= len(self.cards):
-            self._focus_index = len(self.cards) - 1
+            if self.current_page < self.total_pages - 1:
+                self._go_next_page()
+                self._focus_index = 0
+            else:
+                self._focus_index = len(self.cards) - 1
         
         self._update_focus()
     
@@ -1343,7 +1415,11 @@ class BlurredImagesGridWidget(QScrollArea):
         # インデックスを戻す
         self._focus_index -= 1
         if self._focus_index < 0:
-            self._focus_index = 0
+            if self.current_page > 0:
+                self._go_prev_page()
+                self._focus_index = len(self.cards) - 1
+            else:
+                self._focus_index = 0
         
         self._update_focus()
     
@@ -1354,6 +1430,7 @@ class BlurredImagesGridWidget(QScrollArea):
         
         card = self.cards[self._focus_index]
         card.set_focused(True)
+        self.last_focused_path = card.image_info.path
         self.image_selected.emit(card.image_info)
         
         # 表示領域に入るようにスクロール
@@ -1372,5 +1449,39 @@ class BlurredImagesGridWidget(QScrollArea):
                 card.set_focused(True)
                 break
         
+        self.last_focused_path = image_info.path
         self.image_selected.emit(image_info)
+    
+    def _restore_focus(self):
+        """保存されたパスの画像にフォーカスを戻す"""
+        for i, card in enumerate(self.cards):
+            if card.image_info.path == self.last_focused_path:
+                 self._focus_index = i
+                 card.set_focused(True)
+                 self.image_selected.emit(card.image_info)
+                 self.ensureWidgetVisible(card)
+                 return
+
+    def toggle_current_image_selection(self):
+        """現在のフォーカス画像のチェックをトグル"""
+        if 0 <= self._focus_index < len(self.cards):
+            card = self.cards[self._focus_index]
+            card.set_delete(not card.is_marked_delete)
+    
+    def keyPressEvent(self, event):
+        """キーイベント処理"""
+        if event.key() == Qt.Key_Space:
+            # スペースキーでチェック切り替え
+            self.toggle_current_image_selection()
+            event.accept()
+        elif event.key() == Qt.Key_Right:
+            # 右キーで次の画像
+            self.select_next_image()
+            event.accept()
+        elif event.key() == Qt.Key_Left:
+            # 左キーで前の画像
+            self.select_prev_image()
+            event.accept()
+        else:
+            super().keyPressEvent(event)
 

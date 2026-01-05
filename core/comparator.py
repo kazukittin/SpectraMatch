@@ -31,6 +31,7 @@ class ImageInfo:
     sharpness_score: float = 0.0
     clip_embedding: Optional[np.ndarray] = None
     phash_int: int = 0
+    is_marked_delete: bool = False
     
     @property
     def resolution(self) -> int:
