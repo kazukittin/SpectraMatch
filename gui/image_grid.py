@@ -169,10 +169,13 @@ class ImageCard(QFrame):
         super().__init__(parent)
         self.image_info = image_info
         self.is_marked_delete = False
+        self.is_focused = False
         self._thumbnail_loaded = False
         self._setup_ui()
         # 非同期でサムネイルを読み込み開始
         self._start_thumbnail_load()
+    
+
     
     def _setup_ui(self):
         self.setObjectName("imageCard")
@@ -278,10 +281,41 @@ class ImageCard(QFrame):
         self.selection_changed.emit(self.image_info, self.is_marked_delete)
     
     def _update_style(self):
-        if self.is_marked_delete:
+        if self.is_focused:
+            # フォーカス時は背景白、文字黒、青枠
+            # 既存のスタイルを上書き
+            if self.is_marked_delete:
+                # 削除対象かつフォーカスの場合
+                self.setStyleSheet("""
+                    #imageCard {
+                        background-color: #ffdce0; /* 薄い赤 */
+                        border: 3px solid #00ffff;
+                        border-radius: 8px;
+                    }
+                    QLabel { color: black; }
+                    QCheckBox { color: black; }
+                """)
+            else:
+                # 通常フォーカス
+                self.setStyleSheet("""
+                    #imageCard {
+                        background-color: white;
+                        border: 3px solid #00ffff;
+                        border-radius: 8px;
+                    }
+                    QLabel { color: black; }
+                    QCheckBox { color: black; }
+                """)
+        elif self.is_marked_delete:
             self.setStyleSheet(DarkTheme.get_card_style("delete"))
         else:
             self.setStyleSheet(DarkTheme.get_card_style("normal"))
+    
+    def set_focused(self, focused: bool):
+        """フォーカス状態を設定"""
+        if self.is_focused != focused:
+            self.is_focused = focused
+            self._update_style()
     
     def set_delete(self, delete: bool):
         self.delete_checkbox.blockSignals(True)
@@ -448,6 +482,7 @@ class ImageGridWidget(QScrollArea):
         self.all_groups: List[SimilarityGroup] = []
         self.current_page = 0
         self.total_pages = 0
+        self._focus_index = -1
         self._setup_ui()
     
     def _setup_ui(self):
@@ -479,46 +514,108 @@ class ImageGridWidget(QScrollArea):
             self.pagination_widget.deleteLater()
         
         self.pagination_widget = QWidget()
-        self.pagination_widget.setStyleSheet("background-color: #2b2b2b; border-radius: 8px; padding: 10px;")
+        self.pagination_widget.setStyleSheet("background-color: transparent;")
         
-        layout = QHBoxLayout(self.pagination_widget)
-        layout.setContentsMargins(20, 10, 20, 10)
-        layout.setSpacing(20)
-        
-        # 前のページボタン
-        self.prev_btn = QPushButton("◀ 前のページ")
-        self.prev_btn.setFixedHeight(36)
-        self.prev_btn.clicked.connect(self._go_prev_page)
-        layout.addWidget(self.prev_btn)
-        
-        layout.addStretch()
-        
-        # ページ情報
-        self.page_label = QLabel()
-        self.page_label.setStyleSheet("font-size: 14px; font-weight: bold;")
-        layout.addWidget(self.page_label)
-        
-        layout.addStretch()
-        
-        # 次のページボタン
-        self.next_btn = QPushButton("次のページ ▶")
-        self.next_btn.setFixedHeight(36)
-        self.next_btn.clicked.connect(self._go_next_page)
-        layout.addWidget(self.next_btn)
+        self.pagination_layout = QHBoxLayout(self.pagination_widget)
+        self.pagination_layout.setContentsMargins(0, 20, 0, 20)
+        self.pagination_layout.setSpacing(10)
+        self.pagination_layout.setAlignment(Qt.AlignCenter)
         
         return self.pagination_widget
     
     def _update_pagination_state(self):
-        """ページネーション状態を更新"""
+        """ページネーション状態を更新（ボタン再生成）"""
         if not self.pagination_widget:
             return
+            
+        # 既存のボタンを削除
+        while self.pagination_layout.count():
+            item = self.pagination_layout.takeAt(0)
+            if item.widget():
+                item.widget().deleteLater()
         
-        self.prev_btn.setEnabled(self.current_page > 0)
-        self.next_btn.setEnabled(self.current_page < self.total_pages - 1)
-        self.page_label.setText(
-            f"ページ {self.current_page + 1} / {self.total_pages} "
-            f"(全{len(self.all_groups)}グループ)"
-        )
+        if self.total_pages <= 1:
+            return
+            
+        # 前へボタン
+        prev_btn = QPushButton("◀")
+        prev_btn.setFixedSize(58, 40)
+        prev_btn.setEnabled(self.current_page > 0)
+        prev_btn.clicked.connect(self._go_prev_page)
+        self.pagination_layout.addWidget(prev_btn)
+        
+        # ページ番号ボタン
+        start_page = max(0, self.current_page - 2)
+        end_page = min(self.total_pages - 1, self.current_page + 2)
+        
+        # 最初のページ
+        if start_page > 0:
+            self._add_page_button(0)
+            if start_page > 1:
+                lbl = QLabel("...")
+                lbl.setStyleSheet("color: #888;")
+                self.pagination_layout.addWidget(lbl)
+        
+        # 範囲内のページ
+        for i in range(start_page, end_page + 1):
+            self._add_page_button(i, i == self.current_page)
+            
+        # 最後のページ
+        if end_page < self.total_pages - 1:
+            if end_page < self.total_pages - 2:
+                lbl = QLabel("...")
+                lbl.setStyleSheet("color: #888;")
+                self.pagination_layout.addWidget(lbl)
+            self._add_page_button(self.total_pages - 1)
+            
+        # 次へボタン
+        next_btn = QPushButton("▶")
+        next_btn.setFixedSize(58, 40)
+        next_btn.setEnabled(self.current_page < self.total_pages - 1)
+        next_btn.clicked.connect(self._go_next_page)
+        self.pagination_layout.addWidget(next_btn)
+        
+        # ラベル
+        info_label = QLabel(f" {self.current_page + 1}/{self.total_pages} ")
+        info_label.setStyleSheet("color: #aaa; margin-left: 10px; font-weight: bold;")
+        self.pagination_layout.addWidget(info_label)
+
+    def _add_page_button(self, page_index: int, is_current: bool = False):
+        """ページ番号ボタンを追加"""
+        btn = QPushButton(str(page_index + 1))
+        btn.setFixedSize(58, 40)
+        btn.setCheckable(True)
+        btn.setChecked(is_current)
+        if is_current:
+            btn.setStyleSheet("""
+                QPushButton {
+                    background-color: #00ffff;
+                    color: #1e1e1e;
+                    font-weight: bold;
+                    border: none;
+                    border-radius: 8px;
+                }
+            """)
+        else:
+            btn.setStyleSheet("""
+                QPushButton {
+                    background-color: #3a3a3a;
+                    color: #e0e0e0;
+                    border: none;
+                    border-radius: 8px;
+                }
+                QPushButton:hover {
+                    background-color: #4a4a4a;
+                }
+            """)
+        # ラムダ式の変数キャプチャ問題を回避するためにデフォルト引数を使用
+        btn.clicked.connect(lambda checked=False, idx=page_index: self._go_to_page(idx))
+        self.pagination_layout.addWidget(btn)
+
+    def _go_to_page(self, page_index: int):
+        if 0 <= page_index < self.total_pages and page_index != self.current_page:
+            self.current_page = page_index
+            self._display_current_page()
     
     def _go_prev_page(self):
         """前のページに移動"""
@@ -556,10 +653,13 @@ class ImageGridWidget(QScrollArea):
         end_idx = min(start_idx + self.GROUPS_PER_PAGE, len(self.all_groups))
         page_groups = self.all_groups[start_idx:end_idx]
         
+        # フォーカスリセット
+        self._focus_index = -1
+        
         # グループウィジェットを作成
         for group in page_groups:
             widget = SimilarityGroupWidget(group)
-            widget.card_clicked.connect(self.image_selected)
+            widget.card_clicked.connect(self._on_card_clicked_from_group)
             for card in widget.cards:
                 card.selection_changed.connect(self._on_selection_changed)
             self.group_widgets.append(widget)
@@ -667,6 +767,85 @@ class ImageGridWidget(QScrollArea):
             self.empty_label.setVisible(True)
         
         return removed_groups
+    
+    def _get_all_cards(self) -> List[ImageCard]:
+        """現在のページの全カードを取得"""
+        cards = []
+        for widget in self.group_widgets:
+            cards.extend(widget.cards)
+        return cards
+    
+    def select_next_image(self):
+        """次の画像を選択"""
+        cards = self._get_all_cards()
+        if not cards:
+            return
+        
+        # 現在のフォーカスを解除
+        if 0 <= self._focus_index < len(cards):
+            cards[self._focus_index].set_focused(False)
+        
+        # インデックスを進める
+        self._focus_index += 1
+        if self._focus_index >= len(cards):
+            # 次のページへ？とりあえずループさせたりせず止めるか、ページ送り機能を実装するか
+            # ここでは現在のページの最後までいったら止める
+            self._focus_index = len(cards) - 1
+        
+        self._update_focus(cards)
+    
+    def select_prev_image(self):
+        """前の画像を選択"""
+        cards = self._get_all_cards()
+        if not cards:
+            return
+        
+        # 現在のフォーカスを解除
+        if 0 <= self._focus_index < len(cards):
+            cards[self._focus_index].set_focused(False)
+        
+        # インデックスを戻す
+        self._focus_index -= 1
+        if self._focus_index < 0:
+            self._focus_index = 0
+        
+        self._update_focus(cards)
+    
+    def _update_focus(self, cards: List[ImageCard]):
+        """フォーカスを更新し、シグナルを発行"""
+        if not cards or self._focus_index < 0 or self._focus_index >= len(cards):
+            return
+        
+        card = cards[self._focus_index]
+        card.set_focused(True)
+        self.image_selected.emit(card.image_info)
+        
+        # 表示領域に入るようにスクロール
+        self.ensureWidgetVisible(card)
+    
+    def _on_selection_changed(self, image_info, is_delete):
+        """選択変更時"""
+        count = sum(len(w.get_files_to_delete()) for w in self.group_widgets)
+        self.files_to_delete_changed.emit(count)
+        
+        # クリックされたカードにフォーカス移動（もしクリック経由なら）
+        # ここでは直接判定できないが、クリックイベントは別ルートで来る
+    
+    def _on_card_clicked_from_group(self, image_info):
+        """グループからカードクリックシグナルを受信"""
+        # フォーカスインデックスを更新
+        cards = self._get_all_cards()
+        for i, card in enumerate(cards):
+            if card.image_info == image_info:
+                # 古いフォーカス解除
+                if 0 <= self._focus_index < len(cards):
+                    cards[self._focus_index].set_focused(False)
+                
+                self._focus_index = i
+                card.set_focused(True)
+                break
+        
+        self.image_selected.emit(image_info)
 
 
 class BlurredImageCard(QFrame):
@@ -681,6 +860,8 @@ class BlurredImageCard(QFrame):
         self.image_info = image_info
         self.rank = rank  # 順位
         self.is_marked_delete = False
+        self.is_focused = False
+
         self._thumbnail_loaded = False
         self._setup_ui()
         self._start_thumbnail_load()
@@ -781,10 +962,37 @@ class BlurredImageCard(QFrame):
         self.selection_changed.emit(self.image_info, self.is_marked_delete)
     
     def _update_style(self):
-        if self.is_marked_delete:
+        if self.is_focused:
+            if self.is_marked_delete:
+                self.setStyleSheet("""
+                    #blurredImageCard {
+                        background-color: #ffdce0; /* 薄い赤 */
+                        border: 3px solid #00ffff;
+                        border-radius: 8px;
+                    }
+                    QLabel { color: black; }
+                    QCheckBox { color: black; }
+                """)
+            else:
+                self.setStyleSheet("""
+                    #blurredImageCard {
+                        background-color: white;
+                        border: 3px solid #00ffff;
+                        border-radius: 8px;
+                    }
+                    QLabel { color: black; }
+                    QCheckBox { color: black; }
+                """)
+        elif self.is_marked_delete:
             self.setStyleSheet(DarkTheme.get_card_style("delete"))
         else:
             self.setStyleSheet(DarkTheme.get_card_style("normal"))
+    
+    def set_focused(self, focused: bool):
+        """フォーカス状態を設定"""
+        if self.is_focused != focused:
+            self.is_focused = focused
+            self._update_style()
     
     def set_delete(self, delete: bool):
         self.delete_checkbox.blockSignals(True)
@@ -825,6 +1033,7 @@ class BlurredImagesGridWidget(QScrollArea):
         self.all_images: List[ImageInfo] = []
         self.current_page = 0
         self.total_pages = 0
+        self._focus_index = -1
         self._setup_ui()
     
     def _setup_ui(self):
@@ -856,42 +1065,107 @@ class BlurredImagesGridWidget(QScrollArea):
             self.pagination_widget.deleteLater()
         
         self.pagination_widget = QWidget()
-        self.pagination_widget.setStyleSheet("background-color: #2b2b2b; border-radius: 8px; padding: 10px;")
+        self.pagination_widget.setStyleSheet("background-color: transparent;")
         
-        layout = QHBoxLayout(self.pagination_widget)
-        layout.setContentsMargins(20, 10, 20, 10)
-        layout.setSpacing(20)
-        
-        self.prev_btn = QPushButton("◀ 前のページ")
-        self.prev_btn.setFixedHeight(36)
-        self.prev_btn.clicked.connect(self._go_prev_page)
-        layout.addWidget(self.prev_btn)
-        
-        layout.addStretch()
-        
-        self.page_label = QLabel()
-        self.page_label.setStyleSheet("font-size: 14px; font-weight: bold;")
-        layout.addWidget(self.page_label)
-        
-        layout.addStretch()
-        
-        self.next_btn = QPushButton("次のページ ▶")
-        self.next_btn.setFixedHeight(36)
-        self.next_btn.clicked.connect(self._go_next_page)
-        layout.addWidget(self.next_btn)
+        self.pagination_layout = QHBoxLayout(self.pagination_widget)
+        self.pagination_layout.setContentsMargins(0, 20, 0, 20)
+        self.pagination_layout.setSpacing(10)
+        self.pagination_layout.setAlignment(Qt.AlignCenter)
         
         return self.pagination_widget
     
     def _update_pagination_state(self):
+        """ページネーション状態を更新"""
         if not self.pagination_widget:
             return
         
-        self.prev_btn.setEnabled(self.current_page > 0)
-        self.next_btn.setEnabled(self.current_page < self.total_pages - 1)
-        self.page_label.setText(
-            f"ページ {self.current_page + 1} / {self.total_pages} "
-            f"(全{len(self.all_images)}枚)"
-        )
+        # 既存のボタンを削除
+        while self.pagination_layout.count():
+            item = self.pagination_layout.takeAt(0)
+            if item.widget():
+                item.widget().deleteLater()
+        
+        if self.total_pages <= 1:
+            return
+            
+        # 前へボタン
+        prev_btn = QPushButton("◀")
+        prev_btn.setFixedSize(58, 40)
+        prev_btn.setEnabled(self.current_page > 0)
+        prev_btn.clicked.connect(self._go_prev_page)
+        self.pagination_layout.addWidget(prev_btn)
+        
+        # ページ番号ボタン
+        start_page = max(0, self.current_page - 2)
+        end_page = min(self.total_pages - 1, self.current_page + 2)
+        
+        # 最初のページ
+        if start_page > 0:
+            self._add_page_button(0)
+            if start_page > 1:
+                lbl = QLabel("...")
+                lbl.setStyleSheet("color: #888;")
+                self.pagination_layout.addWidget(lbl)
+        
+        # 範囲内のページ
+        for i in range(start_page, end_page + 1):
+            self._add_page_button(i, i == self.current_page)
+            
+        # 最後のページ
+        if end_page < self.total_pages - 1:
+            if end_page < self.total_pages - 2:
+                lbl = QLabel("...")
+                lbl.setStyleSheet("color: #888;")
+                self.pagination_layout.addWidget(lbl)
+            self._add_page_button(self.total_pages - 1)
+            
+        # 次へボタン
+        next_btn = QPushButton("▶")
+        next_btn.setFixedSize(58, 40)
+        next_btn.setEnabled(self.current_page < self.total_pages - 1)
+        next_btn.clicked.connect(self._go_next_page)
+        self.pagination_layout.addWidget(next_btn)
+        
+        # ラベル
+        info_label = QLabel(f" {self.current_page + 1}/{self.total_pages} ")
+        info_label.setStyleSheet("color: #aaa; margin-left: 10px; font-weight: bold;")
+        self.pagination_layout.addWidget(info_label)
+
+    def _add_page_button(self, page_index: int, is_current: bool = False):
+        """ページ番号ボタンを追加"""
+        btn = QPushButton(str(page_index + 1))
+        btn.setFixedSize(58, 40)
+        btn.setCheckable(True)
+        btn.setChecked(is_current)
+        if is_current:
+            btn.setStyleSheet("""
+                QPushButton {
+                    background-color: #00ffff;
+                    color: #1e1e1e;
+                    font-weight: bold;
+                    border: none;
+                    border-radius: 8px;
+                }
+            """)
+        else:
+            btn.setStyleSheet("""
+                QPushButton {
+                    background-color: #3a3a3a;
+                    color: #e0e0e0;
+                    border: none;
+                    border-radius: 8px;
+                }
+                QPushButton:hover {
+                    background-color: #4a4a4a;
+                }
+            """)
+        btn.clicked.connect(lambda checked=False, idx=page_index: self._go_to_page(idx))
+        self.pagination_layout.addWidget(btn)
+
+    def _go_to_page(self, page_index: int):
+        if 0 <= page_index < self.total_pages and page_index != self.current_page:
+            self.current_page = page_index
+            self._display_current_page()
     
     def _go_prev_page(self):
         if self.current_page > 0:
@@ -925,6 +1199,9 @@ class BlurredImagesGridWidget(QScrollArea):
         end_idx = min(start_idx + self.IMAGES_PER_PAGE, len(self.all_images))
         page_images = self.all_images[start_idx:end_idx]
         
+        # フォーカスリセット
+        self._focus_index = -1
+        
         # グリッドレイアウトで表示
         self.grid_widget = QWidget()
         self.grid_widget.setStyleSheet("background-color: transparent;")
@@ -936,7 +1213,7 @@ class BlurredImagesGridWidget(QScrollArea):
         for i, image_info in enumerate(page_images):
             rank = start_idx + i + 1  # 全体での順位
             card = BlurredImageCard(image_info, rank)
-            card.clicked.connect(self.image_selected)
+            card.clicked.connect(self._on_card_clicked)
             card.selection_changed.connect(self._on_selection_changed)
             self.cards.append(card)
             row = i // cols
@@ -1035,3 +1312,65 @@ class BlurredImagesGridWidget(QScrollArea):
             self.clear()
             self.empty_label.setText("ブレ画像はありません")
             self.empty_label.setVisible(True)
+        
+        return removed_count
+
+    def select_next_image(self):
+        """次の画像を選択"""
+        if not self.cards:
+            return
+        
+        # 現在のフォーカスを解除
+        if 0 <= self._focus_index < len(self.cards):
+            self.cards[self._focus_index].set_focused(False)
+        
+        # インデックスを進める
+        self._focus_index += 1
+        if self._focus_index >= len(self.cards):
+            self._focus_index = len(self.cards) - 1
+        
+        self._update_focus()
+    
+    def select_prev_image(self):
+        """前の画像を選択"""
+        if not self.cards:
+            return
+        
+        # 現在のフォーカスを解除
+        if 0 <= self._focus_index < len(self.cards):
+            self.cards[self._focus_index].set_focused(False)
+        
+        # インデックスを戻す
+        self._focus_index -= 1
+        if self._focus_index < 0:
+            self._focus_index = 0
+        
+        self._update_focus()
+    
+    def _update_focus(self):
+        """フォーカスを更新し、シグナルを発行"""
+        if not self.cards or self._focus_index < 0 or self._focus_index >= len(self.cards):
+            return
+        
+        card = self.cards[self._focus_index]
+        card.set_focused(True)
+        self.image_selected.emit(card.image_info)
+        
+        # 表示領域に入るようにスクロール
+        self.ensureWidgetVisible(card)
+
+    def _on_card_clicked(self, image_info):
+        """カードクリック時の処理"""
+        # フォーカスインデックスを更新
+        for i, card in enumerate(self.cards):
+            if card.image_info == image_info:
+                # 古いフォーカス解除
+                if 0 <= self._focus_index < len(self.cards):
+                    self.cards[self._focus_index].set_focused(False)
+                
+                self._focus_index = i
+                card.set_focused(True)
+                break
+        
+        self.image_selected.emit(image_info)
+

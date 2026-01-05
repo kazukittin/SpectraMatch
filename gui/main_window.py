@@ -14,13 +14,16 @@ from PySide6.QtWidgets import (
     QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
     QLabel, QPushButton, QProgressBar,
     QFileDialog, QMessageBox, QApplication,
-    QComboBox, QStackedWidget, QPlainTextEdit, QSplitter
+    QComboBox, QStackedWidget, QPlainTextEdit, QSplitter,
+    QSizePolicy
 )
 from PySide6.QtGui import QFont
 
 from core.scanner import ImageScanner, ScanResult, ScanMode
 from core.comparator import SimilarityGroup
 from core.clip_engine import is_ai_installed, is_ai_installed_on_disk, get_install_command
+from core.config import ConfigManager
+from PySide6.QtGui import QFont, QKeySequence, QShortcut
 from .image_grid import ImageGridWidget, BlurredImagesGridWidget
 from .settings_dialog import SettingsDialog
 from .preview_panel import PreviewPanel
@@ -41,14 +44,27 @@ class MainWindow(QMainWindow):
     
     def __init__(self):
         super().__init__()
+        
+        # 設定の読み込み
+        self.config = ConfigManager()
+        
         self.scanner = ImageScanner()
-        self.current_folders: List[Path] = []
-        self.current_threshold: int = 85  # デフォルト閾値
+        
+        # 設定から復元
+        saved_folders = self.config.get_scan_folders()
+        self.current_folders: List[Path] = [Path(p) for p in saved_folders if Path(p).exists()]
+        self.current_threshold: int = self.config.get_threshold()
+        
         self.scan_result: ScanResult = None
         self.current_view_mode = "similar"  # "similar" or "blurred"
         
         self._setup_ui()
         self._connect_signals()
+        self._setup_shortcuts()
+        
+        # UIに初期値を反映（スキャンボタンの有効化など）
+        self._update_settings_summary()
+        self.scan_btn.setEnabled(len(self.current_folders) > 0)
     
     def _setup_ui(self):
         self.setWindowTitle("SpectraMatch - 画像類似検出・削除ツール")
@@ -221,9 +237,8 @@ class MainWindow(QMainWindow):
         footer.setStyleSheet("background-color: #2b2b2b; border-top: 1px solid #4a4a4a;")
         footer_layout = QHBoxLayout(footer)
         footer_layout.setContentsMargins(16, 10, 16, 10)
-        footer_layout.setSpacing(10)
+        footer_layout.setSpacing(12)
         
-        # 左側：スキャン・選択ボタン
         # スキャンボタン
         self.scan_btn = QPushButton("🔍 スキャン")
         self.scan_btn.setObjectName("scanButton")
@@ -256,28 +271,6 @@ class MainWindow(QMainWindow):
             }
         """)
         footer_layout.addWidget(self.scan_btn)
-        
-        # 中止ボタン（スキャン中のみ表示）
-        self.stop_btn = QPushButton("⏹ 中止")
-        self.stop_btn.setMinimumHeight(40)
-        self.stop_btn.setVisible(False)
-        self.stop_btn.setToolTip("⏹ スキャンを中止\n\n現在のスキャン処理を中断します。")
-        self.stop_btn.setStyleSheet("""
-            QPushButton {
-                background-color: #e74c3c;
-                color: white;
-                font-weight: bold;
-                padding: 8px 16px;
-                border-radius: 4px;
-                border: 2px solid transparent;
-            }
-            QPushButton:hover {
-                background-color: #c0392b;
-                border: 2px solid #e74c3c;
-            }
-        """)
-        self.stop_btn.clicked.connect(self._on_stop_scan)
-        footer_layout.addWidget(self.stop_btn)
         
         # スマート全選択ボタン
         self.smart_select_btn = QPushButton("⚡ 全選択")
@@ -313,26 +306,55 @@ class MainWindow(QMainWindow):
         """)
         footer_layout.addWidget(self.smart_select_btn)
         
-        footer_layout.addSpacing(20)
+        # 中止ボタン
+        self.stop_btn = QPushButton("⏹ 中止")
+        self.stop_btn.setMinimumHeight(40)
+        self.stop_btn.setVisible(False)
+        self.stop_btn.setToolTip("⏹ スキャンを中止\n\n現在のスキャン処理を中断します。")
+        self.stop_btn.clicked.connect(self._on_stop_scan)
+        self.stop_btn.setStyleSheet("""
+            QPushButton {
+                background-color: #c0392b;
+                color: white;
+                font-weight: bold;
+                padding: 8px 16px;
+                border-radius: 4px;
+                border: 2px solid transparent;
+            }
+            QPushButton:hover {
+                background-color: #e74c3c;
+                border: 2px solid #c0392b;
+            }
+        """)
+        footer_layout.addWidget(self.stop_btn)
         
-        # 進捗表示
+        # === プログレスバー（Expanding） ===
+        
+        self.progress_container = QWidget()
+        self.progress_container.setVisible(False)  # 初期状態は非表示
+        progress_layout = QVBoxLayout(self.progress_container)
+        progress_layout.setContentsMargins(0, 0, 0, 0)
+        progress_layout.setSpacing(2)
+        
         self.progress_bar = QProgressBar()
         self.progress_bar.setVisible(False)
         self.progress_bar.setTextVisible(False)
-        self.progress_bar.setMinimumWidth(200)
-        self.progress_bar.setMaximumWidth(300)
-        self.progress_bar.setMaximumHeight(20)
-        footer_layout.addWidget(self.progress_bar)
+        self.progress_bar.setMinimumHeight(16)
+        self.progress_bar.setMaximumHeight(16)
+        progress_layout.addWidget(self.progress_bar)
         
         self.progress_label = QLabel("")
-        self.progress_label.setStyleSheet("color: #95a5a6; font-size: 11px;")
-        footer_layout.addWidget(self.progress_label)
+        self.progress_label.setAlignment(Qt.AlignCenter)
+        self.progress_label.setStyleSheet("color: #95a5a6; font-size: 10px;")
+        progress_layout.addWidget(self.progress_label)
         
-        footer_layout.addStretch()
+        # コンテナをExpandingに設定
+        self.progress_container.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+        footer_layout.addWidget(self.progress_container)
         
-        # 右側：削除関連
         # 削除対象カウントラベル
         self.delete_count_label = QLabel("")
+        self.delete_count_label.setVisible(False)  # 初期状態は非表示
         self.delete_count_label.setStyleSheet("color: #e74c3c; font-weight: bold; font-size: 13px;")
         footer_layout.addWidget(self.delete_count_label)
         
@@ -444,6 +466,60 @@ class MainWindow(QMainWindow):
         """ブレ画像の選択解除"""
         self.blurred_grid.clear_selection()
     
+    def _setup_shortcuts(self):
+        """キーボードショートカットの設定"""
+        # スキャン開始 (Ctrl+R)
+        self.shortcut_scan = QShortcut(QKeySequence("Ctrl+R"), self)
+        self.shortcut_scan.activated.connect(self._on_start_scan)
+        
+        # スキャン中止 (Ctrl+Shift+R)
+        self.shortcut_stop = QShortcut(QKeySequence("Ctrl+Shift+R"), self)
+        self.shortcut_stop.activated.connect(self._on_stop_scan)
+        
+        # 全選択 (Ctrl+A)
+        self.shortcut_select_all = QShortcut(QKeySequence.SelectAll, self)
+        self.shortcut_select_all.activated.connect(self._handle_select_all_shortcut)
+        
+        # 削除実行 (Delete / Backspace)
+        self.shortcut_delete = QShortcut(QKeySequence.Delete, self)
+        self.shortcut_delete.activated.connect(self._on_delete_files)
+        
+        # 設定を開く (Ctrl+,)
+        self.shortcut_settings = QShortcut(QKeySequence("Ctrl+,"), self)
+        self.shortcut_settings.activated.connect(self._on_open_settings)
+        
+        # 画像送り／戻し (矢印キー)
+        self.shortcut_next = QShortcut(QKeySequence(Qt.Key_Right), self)
+        self.shortcut_next.activated.connect(self._select_next_image)
+        
+        self.shortcut_prev = QShortcut(QKeySequence(Qt.Key_Left), self)
+        self.shortcut_prev.activated.connect(self._select_prev_image)
+    
+    def _select_next_image(self):
+        """次の画像を選択してプレビュー"""
+        if self.current_view_mode == "similar":
+            self.image_grid.select_next_image()
+        else:
+            self.blurred_grid.select_next_image()
+            
+    def _select_prev_image(self):
+        """前の画像を選択してプレビュー"""
+        if self.current_view_mode == "similar":
+            self.image_grid.select_prev_image()
+        else:
+            self.blurred_grid.select_prev_image()
+    
+    def _handle_select_all_shortcut(self):
+        """Ctrl+A ショートカットハンドラ"""
+        if self.current_view_mode == "similar":
+            if self.smart_select_btn.isEnabled():
+                self._on_smart_select_all()
+        else:
+            # ブレ画像モードでの全選択
+            # TODO: 現在のページだけでなく全画像を対象にするか要検討
+            # ここでは現在のページの画像を全選択する実装にする
+            pass
+    
     def _connect_signals(self):
         """シグナル接続"""
         self.scanner.progress_updated.connect(self._on_progress_updated)
@@ -515,13 +591,17 @@ class MainWindow(QMainWindow):
         self.current_folders = folders
         self.current_threshold = threshold
         
+        # 設定を保存
+        self.config.set_scan_folders([str(f) for f in folders])
+        self.config.set_threshold(threshold)
+        
         # スキャンボタンの有効/無効を更新
         self.scan_btn.setEnabled(len(self.current_folders) > 0)
         
         # 設定サマリーを更新
         self._update_settings_summary()
         
-        logger.info(f"Settings applied: {len(folders)} folders, threshold={threshold}%")
+        logger.info(f"Settings applied and saved: {len(folders)} folders, threshold={threshold}%")
     
     @Slot()
     def _on_cache_cleared(self):
@@ -694,6 +774,7 @@ class MainWindow(QMainWindow):
         self.delete_btn.setEnabled(False)
         self.smart_select_btn.setEnabled(False)
         self.image_grid.clear()
+        self.progress_container.setVisible(True)
         self.progress_bar.setVisible(True)
         self.progress_bar.setValue(0)
         
@@ -731,6 +812,7 @@ class MainWindow(QMainWindow):
         self.settings_btn.setEnabled(True)
         self.algo_combo.setEnabled(True)
         self.progress_bar.setVisible(False)
+        self.progress_container.setVisible(False)
         
         if result.groups:
             self.image_grid.set_groups(result.groups)
@@ -762,6 +844,7 @@ class MainWindow(QMainWindow):
         self.settings_btn.setEnabled(True)
         self.algo_combo.setEnabled(True)
         self.progress_bar.setVisible(False)
+        self.progress_container.setVisible(False)
         self.progress_label.setText(f"エラー: {error}")
         QMessageBox.critical(self, "エラー", f"スキャン中にエラーが発生しました:\n{error}")
     
@@ -770,8 +853,10 @@ class MainWindow(QMainWindow):
         """削除対象数変更"""
         self.delete_btn.setEnabled(count > 0)
         if count > 0:
+            self.delete_count_label.setVisible(True)
             self.delete_count_label.setText(f"🗑️ {count}枚を削除対象に選択中")
         else:
+            self.delete_count_label.setVisible(False)
             self.delete_count_label.setText("")
     
     @Slot()
