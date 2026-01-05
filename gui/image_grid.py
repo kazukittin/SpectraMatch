@@ -483,6 +483,8 @@ class ImageGridWidget(QScrollArea):
     def __init__(self, parent=None):
         super().__init__(parent)
         self.last_focused_path = None
+        self.last_focused_path = None
+        self.marked_paths: Set[str] = set()
         self.group_widgets: List[SimilarityGroupWidget] = []
         self.all_groups: List[SimilarityGroup] = []
         self.current_page = 0
@@ -663,6 +665,10 @@ class ImageGridWidget(QScrollArea):
         
         # グループウィジェットを作成
         for group in page_groups:
+            # marked_pathsの状態を反映
+            for img in group.images:
+                img.is_marked_delete = (str(img.path) in self.marked_paths)
+            
             widget = SimilarityGroupWidget(group)
             widget.card_clicked.connect(self._on_card_clicked_from_group)
             for card in widget.cards:
@@ -688,7 +694,10 @@ class ImageGridWidget(QScrollArea):
         """グリッドをクリア"""
         for widget in self.group_widgets:
             widget.deleteLater()
+        for widget in self.group_widgets:
+            widget.deleteLater()
         self.group_widgets.clear()
+        self.marked_paths.clear()
         self.all_groups.clear()
         self.current_page = 0
         self.total_pages = 0
@@ -715,22 +724,25 @@ class ImageGridWidget(QScrollArea):
     
     def _on_selection_changed(self, image_info, is_delete):
         """選択変更時"""
-        count = sum(len(w.get_files_to_delete()) for w in self.group_widgets)
+        path_str = str(image_info.path)
+        if is_delete:
+            self.marked_paths.add(path_str)
+        else:
+            self.marked_paths.discard(path_str)
+            
+        count = len(self.marked_paths)
         self.files_to_delete_changed.emit(count)
     
     def smart_select_all(self):
         """現在ページの全グループでスマート自動選択を実行"""
         for widget in self.group_widgets:
             widget.smart_select()
-        count = sum(len(w.get_files_to_delete()) for w in self.group_widgets)
+        count = len(self.marked_paths)
         self.files_to_delete_changed.emit(count)
     
     def get_all_files_to_delete(self) -> List[Path]:
-        """現在ページの削除対象ファイルを取得"""
-        files = []
-        for widget in self.group_widgets:
-            files.extend(widget.get_files_to_delete())
-        return files
+        """全ページの削除対象ファイルを取得"""
+        return [Path(p) for p in self.marked_paths]
     
     def remove_deleted_files(self, deleted_paths: List[Path]) -> int:
         """
@@ -743,6 +755,7 @@ class ImageGridWidget(QScrollArea):
             削除されたグループ数
         """
         deleted_paths_set = {str(p) for p in deleted_paths}
+        self.marked_paths -= deleted_paths_set
         removed_groups = 0
         
         # all_groupsから削除されたファイルを除去
@@ -1092,6 +1105,7 @@ class BlurredImagesGridWidget(QScrollArea):
     def __init__(self, parent=None):
         super().__init__(parent)
         self.last_focused_path = None
+        self.marked_paths: Set[str] = set()
         self.cards: List[BlurredImageCard] = []
         self.all_images: List[ImageInfo] = []
         self.current_page = 0
@@ -1274,8 +1288,11 @@ class BlurredImagesGridWidget(QScrollArea):
         
         cols = 5  # 1行あたりのカード数
         for i, image_info in enumerate(page_images):
+            # marked_pathsの状態を反映
+            image_info.is_marked_delete = (str(image_info.path) in self.marked_paths)
+            
             rank = start_idx + i + 1  # 全体での順位
-            card = BlurredImageCard(image_info, rank)
+            card = BlurredImageCard(image_info, rank, self.grid_widget)
             card.clicked.connect(self._on_card_clicked)
             card.selection_changed.connect(self._on_selection_changed)
             self.cards.append(card)
@@ -1301,7 +1318,10 @@ class BlurredImagesGridWidget(QScrollArea):
         """グリッドをクリア"""
         for card in self.cards:
             card.deleteLater()
+        for card in self.cards:
+            card.deleteLater()
         self.cards.clear()
+        self.marked_paths.clear()
         self.all_images.clear()
         self.current_page = 0
         self.total_pages = 0
@@ -1331,14 +1351,20 @@ class BlurredImagesGridWidget(QScrollArea):
     
     def _on_selection_changed(self, image_info, is_delete):
         """選択変更時"""
-        count = sum(1 for card in self.cards if card.is_marked_delete)
+        path_str = str(image_info.path)
+        if is_delete:
+            self.marked_paths.add(path_str)
+        else:
+            self.marked_paths.discard(path_str)
+            
+        count = len(self.marked_paths)
         self.files_to_delete_changed.emit(count)
     
     def select_all(self):
         """現在ページの全画像を削除対象に選択"""
         for card in self.cards:
             card.set_delete(True)
-        count = sum(1 for card in self.cards if card.is_marked_delete)
+        count = len(self.marked_paths)
         self.files_to_delete_changed.emit(count)
     
     def clear_selection(self):
@@ -1349,7 +1375,7 @@ class BlurredImagesGridWidget(QScrollArea):
     
     def get_all_files_to_delete(self) -> List[Path]:
         """削除対象ファイルを取得"""
-        return [card.image_info.path for card in self.cards if card.is_marked_delete]
+        return [Path(p) for p in self.marked_paths]
     
     def remove_deleted_files(self, deleted_paths: List[Path]):
         """
@@ -1359,6 +1385,7 @@ class BlurredImagesGridWidget(QScrollArea):
             deleted_paths: 削除されたファイルパスのリスト
         """
         deleted_paths_set = {str(p) for p in deleted_paths}
+        self.marked_paths -= deleted_paths_set
         old_count = len(self.all_images)
         
         # all_imagesから削除されたファイルを除去
