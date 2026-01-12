@@ -196,3 +196,161 @@ def find_similar_groups_faiss_clip(
             used.add(j)
     
     return result
+
+
+def compute_phash_distance(hash1: int, hash2: int) -> int:
+    """2つのpHashのハミング距離を計算（符号付き整数対応）"""
+    # 負の値は64ビットのビットパターンとして扱う
+    xor = (hash1 ^ hash2) & 0xFFFFFFFFFFFFFFFF
+    return bin(xor).count('1')
+
+
+def find_similar_groups_hybrid(
+    data: List[Tuple[int, str, np.ndarray, Optional[int]]],
+    clip_threshold: float = 0.85,
+    phash_threshold: float = 0.85,
+    require_both: bool = True
+) -> List[List[Tuple[int, str, float]]]:
+    """
+    CLIP + pHash ハイブリッド類似グループ検出
+    
+    Args:
+        data: [(id, path, embedding, phash), ...] のリスト
+        clip_threshold: CLIP類似度の閾値 (0.0-1.0)
+        phash_threshold: pHash類似度の閾値 (0.0-1.0)、ハミング距離から変換
+        require_both: Trueの場合、CLIPとpHash両方の閾値を満たす必要がある
+                     Falseの場合、どちらか一方を満たせばOK
+    
+    Returns:
+        類似画像グループのリスト
+    """
+    if not _check_faiss_available() or len(data) < 2:
+        return []
+    
+    n = len(data)
+    ids = [item[0] for item in data]
+    paths = [item[1] for item in data]
+    embeddings = np.stack([item[2] for item in data], axis=0).astype(np.float32)
+    phashes = [item[3] for item in data]  # Noneの可能性あり
+    
+    # pHashの最大ハミング距離を計算（閾値から逆算）
+    max_phash_distance = int((1.0 - phash_threshold) * 64)
+    
+    logger.info(f"Hybrid detection: CLIP threshold={clip_threshold}, pHash threshold={phash_threshold} (max distance={max_phash_distance})")
+    
+    # CLIP埋め込みを正規化
+    _faiss.normalize_L2(embeddings)
+    
+    # FAISSインデックス構築
+    dim = embeddings.shape[1]
+    index = _faiss.IndexFlatIP(dim)
+    index.add(embeddings)
+    
+    # k近傍検索
+    k = min(21, n)
+    similarities, indices = index.search(embeddings, k)
+    
+    # ハイブリッドフィルタリング: CLIPとpHash両方でチェック
+    direct_neighbors: Dict[int, List[Tuple[int, float]]] = {}
+    
+    for i in range(n):
+        neighbors = []
+        for j_idx in range(1, k):
+            j = indices[i, j_idx]
+            clip_sim = similarities[i, j_idx]
+            
+            if j < 0 or j == i:
+                continue
+            
+            # CLIP類似度チェック
+            clip_ok = clip_sim >= clip_threshold
+            
+            # pHash類似度チェック
+            phash_ok = False
+            if phashes[i] is not None and phashes[j] is not None:
+                distance = compute_phash_distance(phashes[i], phashes[j])
+                phash_ok = distance <= max_phash_distance
+            else:
+                # pHashがない場合はCLIPのみで判断
+                phash_ok = True if not require_both else False
+            
+            # ハイブリッド判定
+            if require_both:
+                is_similar = clip_ok and phash_ok
+            else:
+                is_similar = clip_ok or phash_ok
+            
+            if is_similar:
+                neighbors.append((j, float(clip_sim)))
+        
+        if neighbors:
+            direct_neighbors[i] = neighbors
+    
+    if not direct_neighbors:
+        logger.info("No similar pairs found with hybrid detection")
+        return []
+    
+    # 相互類似チェック（CLIPのみの時と同じロジック）
+    mutual_pairs: set = set()
+    for i, neighbors in direct_neighbors.items():
+        for j, sim in neighbors:
+            if j in direct_neighbors:
+                j_neighbors = {n[0] for n in direct_neighbors[j]}
+                if i in j_neighbors:
+                    pair = (min(i, j), max(i, j))
+                    mutual_pairs.add(pair)
+    
+    if not mutual_pairs:
+        return []
+    
+    logger.info(f"Found {len(mutual_pairs)} mutual pairs with hybrid detection")
+    
+    # グループ化
+    used = set()
+    result = []
+    
+    candidates = sorted(direct_neighbors.keys(), 
+                       key=lambda x: len(direct_neighbors[x]), 
+                       reverse=True)
+    
+    for center in candidates:
+        if center in used:
+            continue
+        
+        group_members = [center]
+        for neighbor, sim in direct_neighbors.get(center, []):
+            if neighbor in used:
+                continue
+            
+            pair = (min(center, neighbor), max(center, neighbor))
+            if pair not in mutual_pairs:
+                continue
+            
+            is_similar_to_all = True
+            for member in group_members:
+                if member == center:
+                    continue
+                member_pair = (min(member, neighbor), max(member, neighbor))
+                if member_pair not in mutual_pairs:
+                    is_similar_to_all = False
+                    break
+            
+            if is_similar_to_all:
+                group_members.append(neighbor)
+        
+        if len(group_members) >= 2:
+            group = [(ids[m], paths[m]) for m in group_members]
+            result.append(group)
+            for m in group_members:
+                used.add(m)
+    
+    # 残りのペア
+    for i, j in mutual_pairs:
+        if i not in used and j not in used:
+            group = [(ids[i], paths[i]), (ids[j], paths[j])]
+            result.append(group)
+            used.add(i)
+            used.add(j)
+    
+    logger.info(f"Hybrid detection found {len(result)} groups")
+    return result

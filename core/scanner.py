@@ -9,6 +9,7 @@ SQLite + Faiss対応の大規模スキャナー
 - 停止フラグによる中断対応
 """
 
+import gc
 import logging
 import pickle
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -296,6 +297,8 @@ class ImageScanner(QObject):
             logger.info("Starting processing loop...")
             
             CLIP_BATCH_SIZE = 32  # RTX4060に最適化
+            MEMORY_RELEASE_INTERVAL = 5000  # 5000枚ごとにメモリ解放
+            images_since_gc = 0  # GCからの処理枚数カウンタ
             
             for batch_start in range(0, len(files_to_process), CLIP_BATCH_SIZE):
                 if self._stop_event.is_set():
@@ -311,13 +314,15 @@ class ImageScanner(QObject):
                     try:
                         stat = path.stat()
                         sharpness, width, height = self.hasher.compute_sharpness(path)
+                        phash = self.hasher.compute_phash(path)  # pHash計算
                         file_infos.append({
                             'path': path,
                             'file_size': stat.st_size,
                             'last_modified': stat.st_mtime,
                             'width': width,
                             'height': height,
-                            'blur_score': sharpness
+                            'blur_score': sharpness,
+                            'phash': phash
                         })
                     except Exception as e:
                         logger.error(f"ファイル情報取得エラー: {path} - {e}")
@@ -345,7 +350,6 @@ class ImageScanner(QObject):
                         
                         if embedding is not None:
                             info['embedding'] = embedding
-                            info['phash_int'] = 0
                             batch_records.append(info)
                             result.processed_files += 1
                         else:
@@ -364,6 +368,25 @@ class ImageScanner(QObject):
                     processed, result.total_files,
                     f"{mode_name}中... ({processed}/{result.total_files})"
                 )
+                
+                # 5000枚ごとにメモリ解放
+                images_since_gc += len(batch_paths)
+                if images_since_gc >= MEMORY_RELEASE_INTERVAL:
+                    logger.info(f"メモリ解放を実行中... ({processed}枚処理済み)")
+                    self.progress_updated.emit(
+                        processed, result.total_files,
+                        f"メモリ最適化中... ({processed}/{result.total_files})"
+                    )
+                    
+                    # バッチレコードを先にDBに保存
+                    if batch_records:
+                        self.db.batch_upsert(batch_records)
+                        batch_records = []
+                    
+                    # ガベージコレクション実行
+                    gc.collect()
+                    images_since_gc = 0
+                    logger.info("メモリ解放完了")
             
             # 残りをDBに保存
             if batch_records:
@@ -414,21 +437,39 @@ class ImageScanner(QObject):
     # _find_groups_phash は削除されました
     
     def _find_groups_clip(self, threshold: float) -> List[SimilarityGroup]:
-        """DBからCLIPデータを取得してグループ化"""
+        """DBからCLIPデータを取得してグループ化（ハイブリッドモード対応）"""
         clip_threshold = threshold / 100.0
+        phash_threshold = 0.80  # pHashは80%以上の類似度を要求（ハミング距離12以下）
         
-        # Faissが利用可能ならFaissを使用
+        # Faissが利用可能ならハイブリッド検出を使用
         try:
-            from .faiss_engine import find_similar_groups_faiss_clip, _check_faiss_available
+            from .faiss_engine import find_similar_groups_hybrid, find_similar_groups_faiss_clip, _check_faiss_available
             if _check_faiss_available():
-                clip_data = self.db.get_all_embeddings()
-                if len(clip_data) < 2:
+                # ハイブリッドモード: CLIP + pHash
+                hybrid_data = self.db.get_all_embeddings_with_phash()
+                if len(hybrid_data) < 2:
                     return []
                 
-                groups = find_similar_groups_faiss_clip(clip_data, clip_threshold)
+                # pHashがあるデータが一定数あればハイブリッドモード
+                phash_count = sum(1 for d in hybrid_data if d[3] is not None)
+                use_hybrid = phash_count >= len(hybrid_data) * 0.5  # 50%以上にpHashがあれば使用
+                
+                if use_hybrid:
+                    logger.info(f"Using hybrid detection mode (pHash available for {phash_count}/{len(hybrid_data)} images)")
+                    groups = find_similar_groups_hybrid(
+                        hybrid_data, 
+                        clip_threshold=clip_threshold,
+                        phash_threshold=phash_threshold,
+                        require_both=True  # 両方の条件を満たす必要あり
+                    )
+                else:
+                    logger.info(f"Using CLIP-only mode (pHash available for only {phash_count}/{len(hybrid_data)} images)")
+                    clip_data = [(d[0], d[1], d[2]) for d in hybrid_data]
+                    groups = find_similar_groups_faiss_clip(clip_data, clip_threshold)
+                
                 return self._convert_to_similarity_groups(groups, is_phash=False)
-        except ImportError:
-            pass
+        except ImportError as e:
+            logger.warning(f"Faiss import failed: {e}")
         
         # フォールバック: NumPy実装
         return self._find_groups_clip_numpy(clip_threshold)

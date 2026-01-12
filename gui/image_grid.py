@@ -870,13 +870,7 @@ class ImageGridWidget(QScrollArea):
         # 表示領域に入るようにスクロール
         self.ensureWidgetVisible(card)
     
-    def _on_selection_changed(self, image_info, is_delete):
-        """選択変更時"""
-        count = sum(len(w.get_files_to_delete()) for w in self.group_widgets)
-        self.files_to_delete_changed.emit(count)
-        
-        # クリックされたカードにフォーカス移動（もしクリック経由なら）
-        # ここでは直接判定できないが、クリックイベントは別ルートで来る
+
     
     def _on_card_clicked_from_group(self, image_info):
         """グループからカードクリックシグナルを受信"""
@@ -1290,7 +1284,7 @@ class BlurredImagesGridWidget(QScrollArea):
         grid_layout.setContentsMargins(0, 0, 0, 0)
         grid_layout.setSpacing(15)
         
-        cols = 5  # 1行あたりのカード数
+        cols = 4  # 1行あたりのカード数
         for i, image_info in enumerate(page_images):
             # marked_pathsの状態を反映
             image_info.is_marked_delete = (str(image_info.path) in self.marked_paths)

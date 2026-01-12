@@ -19,7 +19,7 @@ class ImageDatabase:
     画像情報を管理するSQLiteデータベースクラス
     """
     
-    DB_VERSION = 2  # pHash削除に伴いバージョンアップ
+    DB_VERSION = 3  # pHash復活（ハイブリッド検出用）
     
     def __init__(self, db_path: Optional[Path] = None):
         if db_path is None:
@@ -41,7 +41,7 @@ class ImageDatabase:
     def _init_schema(self):
         cursor = self.conn.cursor()
         
-        # imagesテーブル (phash_intを削除)
+        # imagesテーブル (phashを復活 - ハイブリッド検出用)
         cursor.execute("""
             CREATE TABLE IF NOT EXISTS images (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -51,11 +51,19 @@ class ImageDatabase:
                 width INTEGER,
                 height INTEGER,
                 blur_score REAL,
+                phash INTEGER,
                 embedding BLOB,
                 created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                 updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
             )
         """)
+        
+        # pHashカラムが無い場合は追加（マイグレーション）
+        try:
+            cursor.execute("SELECT phash FROM images LIMIT 1")
+        except sqlite3.OperationalError:
+            logger.info("Adding phash column to images table")
+            cursor.execute("ALTER TABLE images ADD COLUMN phash INTEGER")
         
         cursor.execute("CREATE INDEX IF NOT EXISTS idx_images_path ON images(path)")
         
@@ -112,14 +120,15 @@ class ImageDatabase:
             
             cursor.execute("""
                 INSERT INTO images 
-                    (path, file_size, last_modified, width, height, blur_score, embedding, updated_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+                    (path, file_size, last_modified, width, height, blur_score, phash, embedding, updated_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
                 ON CONFLICT(path) DO UPDATE SET
                     file_size = excluded.file_size,
                     last_modified = excluded.last_modified,
                     width = excluded.width,
                     height = excluded.height,
                     blur_score = excluded.blur_score,
+                    phash = excluded.phash,
                     embedding = excluded.embedding,
                     updated_at = CURRENT_TIMESTAMP
             """, (
@@ -129,6 +138,7 @@ class ImageDatabase:
                 rec.get('width', 0),
                 rec.get('height', 0),
                 rec.get('blur_score', 0),
+                rec.get('phash'),
                 embedding_blob
             ))
         self.conn.commit()
@@ -141,6 +151,26 @@ class ImageDatabase:
             if row['embedding']:
                 embedding = pickle.loads(row['embedding'])
                 result.append((row['id'], row['path'], embedding))
+        return result
+    
+    def get_all_embeddings_with_phash(self) -> List[Tuple[int, str, np.ndarray, Optional[int]]]:
+        """CLIP埋め込みとpHashを両方取得（ハイブリッド検出用）"""
+        cursor = self.conn.cursor()
+        cursor.execute("SELECT id, path, embedding, phash FROM images WHERE embedding IS NOT NULL")
+        result = []
+        for row in cursor.fetchall():
+            if row['embedding']:
+                embedding = pickle.loads(row['embedding'])
+                result.append((row['id'], row['path'], embedding, row['phash']))
+        return result
+    
+    def get_all_phashes(self) -> List[Tuple[int, str, int]]:
+        """全てのpHashを取得"""
+        cursor = self.conn.cursor()
+        cursor.execute("SELECT id, path, phash FROM images WHERE phash IS NOT NULL")
+        result = []
+        for row in cursor.fetchall():
+            result.append((row['id'], row['path'], row['phash']))
         return result
     
     def get_image_by_path(self, path: str) -> Optional[Dict]:

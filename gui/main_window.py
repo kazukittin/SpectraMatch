@@ -92,16 +92,19 @@ class MainWindow(QMainWindow):
         
         # メインエリア
         main_area = self._create_main_area()
+        main_area.setMinimumWidth(500)  # リストの最小幅
         splitter.addWidget(main_area)
         
         # プレビューパネル（右側）
         self.preview_panel = PreviewPanel()
+        self.preview_panel.setMinimumWidth(350)  # プレビューの最小幅
+        self.preview_panel.setMaximumWidth(600)  # プレビューの最大幅
         splitter.addWidget(self.preview_panel)
         
-        # 初期サイズ比率（メイン:プレビュー = 残り:350）
-        splitter.setSizes([1100, 350])
-        splitter.setStretchFactor(0, 1)  # メインエリアは伸縮
-        splitter.setStretchFactor(1, 0)  # プレビューパネルは固定
+        # 初期サイズ比率（メイン:プレビュー = 60:40）
+        splitter.setSizes([900, 600])
+        splitter.setStretchFactor(0, 2)  # メインエリアは優先的に伸縮
+        splitter.setStretchFactor(1, 1)  # プレビューパネルも伸縮
         
         central_layout.addWidget(splitter)
         self.setCentralWidget(central_widget)

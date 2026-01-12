@@ -12,10 +12,11 @@ from .clip_engine import CLIPEngine
 
 # Faissはオプション
 try:
-    from .faiss_engine import FaissSearchEngine, find_similar_groups_faiss_clip
+    from .faiss_engine import FaissSearchEngine, find_similar_groups_faiss_clip, find_similar_groups_hybrid
 except ImportError:
     FaissSearchEngine = None
     find_similar_groups_faiss_clip = None
+    find_similar_groups_hybrid = None
 
 __all__ = [
     "ImageHasher",
@@ -28,4 +29,5 @@ __all__ = [
     "CLIPEngine",
     "FaissSearchEngine",
     "find_similar_groups_faiss_clip",
+    "find_similar_groups_hybrid",
 ]
