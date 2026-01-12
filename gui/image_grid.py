@@ -48,22 +48,22 @@ def format_file_size(size_bytes: int) -> str:
 
 def get_sharpness_label(score: float) -> str:
     """
-    鮮明度スコアを分かりやすいラベルに変換
+    品質スコアを分かりやすいラベルに変換
     
-    スコアは500px正規化されたLaplacian分散値
-    - 低い値: ブレている、ぼやけている
-    - 高い値: エッジがくっきり、鮮明
+    スコアは500px正規化されたLaplacian分散値 × ノイズペナルティ
+    - 低い値: ブレている、ノイズが多い
+    - 高い値: エッジがくっきり、ノイズが少ない
     """
-    if score < 50:
-        return "かなりブレ"
-    elif score < 100:
-        return "ブレ"
-    elif score < 200:
+    if score < 30:
+        return "低品質（ブレ/ノイズ）"
+    elif score < 80:
+        return "やや低品質"
+    elif score < 150:
         return "やや不鮮明"
-    elif score < 500:
+    elif score < 400:
         return "普通"
     else:
-        return "鮮明"
+        return "高品質"
 
 
 def clear_thumbnail_cache():
@@ -977,16 +977,16 @@ class BlurredImageCard(QFrame):
         sharpness = self.image_info.sharpness_score
         sharpness_desc = get_sharpness_label(sharpness)
         
-        if sharpness < 50:
-            color = "#e74c3c"  # かなりブレ - 赤
-        elif sharpness < 100:
-            color = "#e67e22"  # ブレ - オレンジ
-        elif sharpness < 200:
+        if sharpness < 30:
+            color = "#e74c3c"  # 低品質（ブレ/ノイズ）- 赤
+        elif sharpness < 80:
+            color = "#e67e22"  # やや低品質 - オレンジ
+        elif sharpness < 150:
             color = "#f39c12"  # やや不鮮明 - 黄
-        elif sharpness < 500:
+        elif sharpness < 400:
             color = "#b0b0b0"  # 普通 - グレー
         else:
-            color = "#2ecc71"  # 鮮明 - 緑
+            color = "#2ecc71"  # 高品質 - 緑
         
         self.sharpness_label = QLabel(f"🔍 {sharpness:.0f}\n{sharpness_desc}")
         self.sharpness_label.setAlignment(Qt.AlignCenter)

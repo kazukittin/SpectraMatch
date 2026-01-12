@@ -139,7 +139,10 @@ class ImageHasher:
     
     def compute_sharpness(self, file_path: Path) -> Tuple[float, int, int]:
         """
-        ブレ検知（鮮明度スコア）と解像度を計算
+        ブレ検知（鮮明度スコア）とノイズ検出を組み合わせた品質スコアを計算
+        
+        スコアが高いほど高品質（鮮明でノイズが少ない）
+        スコアが低いほど低品質（ブレやノイズが多い）
         """
         try:
             img = imread_unicode(file_path)
@@ -163,10 +166,83 @@ class ImageHasher:
             else:
                 gray_resized = gray
             
+            # 1. ブレ検出（Laplacian分散）
             laplacian = cv2.Laplacian(gray_resized, cv2.CV_64F)
-            sharpness = laplacian.var()
+            blur_score = laplacian.var()
             
-            return float(sharpness), width, height
+            # 2. ノイズ検出（高周波成分の分析）
+            noise_score = self._estimate_noise(gray_resized)
+            
+            # 3. 複合品質スコアの計算
+            # ブレスコア（高いほど良い）とノイズスコア（低いほど良い）を組み合わせる
+            # ノイズペナルティを適用: ノイズが多いほどスコアを下げる
+            noise_penalty = max(0, 1 - (noise_score / 30))  # ノイズスコア30以上で大幅減点
+            quality_score = blur_score * noise_penalty
+            
+            return float(quality_score), width, height
         except Exception as e:
             logger.error(f"[Sharpness] 例外: {file_path} - {e}")
             return 0.0, 0, 0
+    
+    def _estimate_noise(self, gray_img: np.ndarray) -> float:
+        """
+        画像のノイズレベルを推定
+        
+        手法: 
+        1. ラプラシアン法によるノイズ推定（Immerkaer法の変形）
+        2. ガウシアンフィルタとの差分による高周波ノイズ検出
+        
+        Returns:
+            ノイズレベル（低いほど良い、0-100程度の範囲）
+        """
+        try:
+            # 方法1: ガウシアンフィルタとの差分でノイズを推定
+            # ノイズは高周波成分に現れるため、ぼかした画像との差分を見る
+            blurred = cv2.GaussianBlur(gray_img, (5, 5), 0)
+            diff = cv2.absdiff(gray_img, blurred)
+            noise_level_1 = np.std(diff)
+            
+            # 方法2: ラプラシアンベースのノイズ推定（Immerkaer法）
+            # ノイズはランダムな高周波成分として現れる
+            # 3x3のラプラシアンカーネルを使用
+            kernel = np.array([
+                [1, -2, 1],
+                [-2, 4, -2],
+                [1, -2, 1]
+            ], dtype=np.float64)
+            
+            sigma = cv2.filter2D(gray_img.astype(np.float64), -1, kernel)
+            # ノイズの標準偏差を推定
+            noise_level_2 = np.sqrt(np.pi / 2) * (1 / 6) * np.sum(np.abs(sigma)) / sigma.size
+            
+            # 方法3: 局所分散によるノイズ検出
+            # 画像を小さなブロックに分割し、テクスチャの少ない領域の分散を見る
+            block_size = 16
+            h, w = gray_img.shape
+            min_vars = []
+            for y in range(0, h - block_size, block_size):
+                for x in range(0, w - block_size, block_size):
+                    block = gray_img[y:y+block_size, x:x+block_size]
+                    var = np.var(block)
+                    min_vars.append(var)
+            
+            # 最も分散の低いブロック（平坦な領域）のノイズを見る
+            if min_vars:
+                min_vars.sort()
+                # 下位10%の分散を平均（平坦領域のノイズ推定）
+                num_blocks = max(1, len(min_vars) // 10)
+                noise_level_3 = np.sqrt(np.mean(min_vars[:num_blocks]))
+            else:
+                noise_level_3 = 0
+            
+            # 3つの方法を組み合わせて総合ノイズスコアを計算
+            # 重み付け: ガウシアン差分を重視
+            combined_noise = (noise_level_1 * 0.5 + 
+                            noise_level_2 * 0.3 + 
+                            noise_level_3 * 0.2)
+            
+            return float(combined_noise)
+            
+        except Exception as e:
+            logger.error(f"[Noise] ノイズ推定エラー: {e}")
+            return 0.0
