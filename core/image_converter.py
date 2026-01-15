@@ -184,14 +184,25 @@ class ImageConverter:
         fail_count = 0
         errors = []
         
-        # パス1: 全ファイルを一時的な名前にリネーム（衝突回避）
-        temp_files = []
+        # パス1: 必要な場合のみ一時ファイル名にリネーム（衝突回避）
+        # (temp_path, original_index, original_name) のタプルを保存
+        renaming_entries = []
+        
         for i, img in enumerate(images):
+            # ターゲット名を計算
+            ext = img.suffix
+            target_name = f"{prefix}{str(i + 1).zfill(digits)}{ext}"
+            
+            # 既に名前が一致している場合はスキップ
+            if img.name == target_name:
+                success_count += 1
+                continue
+                
             temp_name = f"__temp_rename_{i:06d}__" + img.suffix
             temp_path = img.parent / temp_name
             try:
                 os.rename(img, temp_path)
-                temp_files.append(temp_path)
+                renaming_entries.append((temp_path, i, img.name))
             except Exception as e:
                 errors.append(f"{img.name}: {e}")
                 fail_count += 1
@@ -201,20 +212,20 @@ class ImageConverter:
                 gc.collect()
         
         # パス2: 一時ファイルを連番にリネーム
-        for i, temp_path in enumerate(temp_files):
+        for j, (temp_path, index, original_name) in enumerate(renaming_entries):
             ext = temp_path.suffix
-            new_name = f"{prefix}{str(i + 1).zfill(digits)}{ext}"
+            new_name = f"{prefix}{str(index + 1).zfill(digits)}{ext}"
             new_path = temp_path.parent / new_name
             try:
                 os.rename(temp_path, new_path)
-                logger.info(f"Renamed: {images[i].name} -> {new_name}")
+                logger.info(f"Renamed: {original_name} -> {new_name}")
                 success_count += 1
             except Exception as e:
                 errors.append(f"{temp_path.name}: {e}")
                 fail_count += 1
             
             # 5000件ごとにメモリ解放
-            if (i + 1) % 5000 == 0:
+            if (j + 1) % 5000 == 0:
                 gc.collect()
         
         # 最終メモリ解放
