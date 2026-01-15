@@ -26,6 +26,7 @@ from core.config import ConfigManager
 from PySide6.QtGui import QFont, QKeySequence, QShortcut
 from .image_grid import ImageGridWidget, BlurredImagesGridWidget
 from .settings_dialog import SettingsDialog
+from .converter_dialog import ConverterDialog
 from .preview_panel import PreviewPanel
 from .styles import DarkTheme
 
@@ -189,6 +190,35 @@ class MainWindow(QMainWindow):
         header_layout.addWidget(self.status_label)
         
         header_layout.addSpacing(12)
+        
+        # 変換ツールボタン
+        self.converter_btn = QPushButton("🛠️")
+        self.converter_btn.setMinimumSize(44, 44)
+        self.converter_btn.setMaximumSize(44, 44)
+        self.converter_btn.setToolTip(
+            "🛠️ 画像変換ツール\n\n"
+            "フォルダ内の画像をJPGに変換し、\n"
+            "古い形式のファイルを削除します。"
+        )
+        self.converter_btn.clicked.connect(self._on_open_converter)
+        self.converter_btn.setStyleSheet("""
+            QPushButton {
+                background-color: #3a3a3a;
+                color: #b0b0b0;
+                font-size: 20px;
+                border: none;
+                border-radius: 22px;
+                padding: 0px;
+            }
+            QPushButton:hover {
+                background-color: #4a4a4a;
+                color: #00ffff;
+            }
+            QPushButton:pressed {
+                background-color: #2a2a2a;
+            }
+        """)
+        header_layout.addWidget(self.converter_btn)
         
         # 設定ボタン（アイコンのみ）
         self.settings_btn = QPushButton("⚙")
@@ -574,6 +604,15 @@ class MainWindow(QMainWindow):
     def _on_preview_unmark_delete(self, path: Path):
         """プレビューパネルで削除マークが外された"""
         pass
+        
+    @Slot()
+    def _on_open_converter(self):
+        """変換ツールを開く"""
+        # 現在選択されているフォルダがあればそれをデフォルトにする
+        default_path = self.current_folders[0] if self.current_folders else None
+        
+        dialog = ConverterDialog(self, default_path)
+        dialog.exec()
     
     @Slot()
     def _on_open_settings(self):
