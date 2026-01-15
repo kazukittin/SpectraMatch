@@ -25,7 +25,7 @@ logger = logging.getLogger(__name__)
 class ConverterThread(QThread):
     """変換処理をバックグラウンドで行うスレッド"""
     progress_updated = Signal(int, int, str)  # current, total, message
-    finished = Signal()
+    # finished = Signal()  <-- QThreadの標準シグナルを使用するため削除
     
     def __init__(self, files: List[Path]):
         super().__init__()
@@ -94,11 +94,11 @@ class ConverterThread(QThread):
                 logger.warning(f"Total {len(still_failed)} files could not be deleted.")
                 # エラーメッセージを含めて完了シグナルを送る
                 self.progress_updated.emit(total, total, f"完了 (失敗: {len(still_failed)} files)")
-                self.finished.emit()
+                # self.finished.emit() # 標準シグナルに任せる
                 return
         
         self.progress_updated.emit(total, total, "完了")
-        self.finished.emit()
+        # self.finished.emit() # 標準シグナルに任せる
         
     def stop(self):
         self.is_running = False
@@ -355,8 +355,15 @@ class ConverterDialog(QDialog):
             self._refresh_file_list()
             
     def _refresh_file_list(self):
-        # 変換対象
+        self.convert_status_label.setText("Scanning...")
+        self.rename_status_label.setText("Scanning...")
         self.file_list.clear()
+        self.rename_file_list.clear()
+        # UI描画を更新させるためにイベント処理を回す
+        from PySide6.QtWidgets import QApplication
+        QApplication.processEvents()
+        
+        # 変換対象
         self.target_files = ImageConverter.get_target_files(self.current_folder)
         
         for p in self.target_files:
@@ -367,7 +374,6 @@ class ConverterDialog(QDialog):
         self.convert_btn.setEnabled(count > 0)
         
         # リネーム対象
-        self.rename_file_list.clear()
         self.all_images = ImageConverter.get_all_images(self.current_folder)
         
         for p in self.all_images:
@@ -472,7 +478,6 @@ class ConverterDialog(QDialog):
         self.progress_bar.setValue(current)
         self.progress_msg.setText(f"{message} ({current}/{total})")
         
-    @Slot()
     @Slot()
     def _on_convert_finished(self):
         # スレッドから失敗リストを取得するのは少し複雑なので、
