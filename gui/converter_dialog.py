@@ -71,12 +71,19 @@ class ConverterThread(QThread):
             self.progress_updated.emit(total, total, "残ったファイルの削除を試みています...")
             import time
             import os
+            import stat
             time.sleep(1.0) # 少し待つ
             
             still_failed = []
             for p in self.failed_deletes:
                 try:
                     if p.exists():
+                        # 読み取り専用属性を外してみる
+                        try:
+                            os.chmod(p, stat.S_IWRITE)
+                        except:
+                            pass
+                            
                         os.remove(p)
                         logger.info(f"Deleted on retry: {p}")
                 except Exception as e:
@@ -85,6 +92,10 @@ class ConverterThread(QThread):
             
             if still_failed:
                 logger.warning(f"Total {len(still_failed)} files could not be deleted.")
+                # エラーメッセージを含めて完了シグナルを送る
+                self.progress_updated.emit(total, total, f"完了 (失敗: {len(still_failed)} files)")
+                self.finished.emit()
+                return
         
         self.progress_updated.emit(total, total, "完了")
         self.finished.emit()
@@ -462,9 +473,30 @@ class ConverterDialog(QDialog):
         self.progress_msg.setText(f"{message} ({current}/{total})")
         
     @Slot()
+    @Slot()
     def _on_convert_finished(self):
-        QMessageBox.information(self, "完了", "すべての変換処理が完了しました。")
+        # スレッドから失敗リストを取得するのは少し複雑なので、
+        # ここでは簡易的にログを確認するように促すか、
+        # もしくはスレッド側でエラー情報を保持して完了シグナルで渡すのが理想的。
+        # 今回はスレッドインスタンスに残っているfailed_deletesを確認する
+        
+        failed_count = 0
+        if self.converter_thread and hasattr(self.converter_thread, 'failed_deletes'):
+            # 再確認：まだ残っているものだけカウント
+            failed_count = len([p for p in self.converter_thread.failed_deletes if p.exists()])
+            
         self.progress_bar.setVisible(False)
         self.progress_msg.setText("")
         self._set_buttons_enabled(True)
         self._refresh_file_list()
+        
+        if failed_count > 0:
+            QMessageBox.warning(
+                self, 
+                "完了（一部削除失敗）", 
+                f"変換は完了しましたが、{failed_count}個の元ファイルを削除できませんでした。\n"
+                "ファイルが他のアプリで開かれているか、権限がない可能性があります。\n\n"
+                "ログを確認してください。"
+            )
+        else:
+            QMessageBox.information(self, "完了", "すべての変換処理が完了しました。")
