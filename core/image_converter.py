@@ -164,9 +164,29 @@ class ImageConverter:
             return False, str(e)
     
     @staticmethod
+    def _is_sequential_name(filename: str, digits: int = 3) -> bool:
+        """
+        ファイル名が連番形式（例: 001.jpg, 002.png）に一致するかチェック
+        
+        Args:
+            filename: チェックするファイル名
+            digits: 桁数（デフォルト3桁）
+            
+        Returns:
+            bool: 連番形式に一致するならTrue
+        """
+        import re
+        # ファイル名から拡張子を除いた部分を取得
+        name_without_ext = Path(filename).stem
+        # 指定桁数の数字のみかチェック（001〜999など）
+        pattern = rf'^[0-9]{{{digits}}}$'
+        return bool(re.match(pattern, name_without_ext))
+    
+    @staticmethod
     def rename_folder_sequential(folder_path: Path, prefix: str = "", digits: int = 3):
         """
         フォルダ内の全画像を連番でリネームする（2パス方式で安全に）
+        既に連番形式のファイルはスキップし、使用済み番号を避けて割り当てる
         
         Args:
             folder_path: 対象フォルダ
@@ -176,6 +196,8 @@ class ImageConverter:
         Returns:
             tuple: (成功数, 失敗数, エラーリスト)
         """
+        import re
+        
         images = ImageConverter.get_all_images(folder_path)
         if not images:
             return 0, 0, []
@@ -183,42 +205,60 @@ class ImageConverter:
         success_count = 0
         fail_count = 0
         errors = []
+        skipped_count = 0
         
-        # パス1: 必要な場合のみ一時ファイル名にリネーム（衝突回避）
-        # (temp_path, original_index, original_name) のタプルを保存
+        # 既に使用されている連番を収集（拡張子関係なく番号だけ）
+        used_numbers = set()
+        files_to_rename = []
+        
+        for img in images:
+            if ImageConverter._is_sequential_name(img.name, digits):
+                # 連番形式のファイルから番号を抽出
+                stem = img.stem  # 拡張子なしのファイル名
+                try:
+                    num = int(stem)
+                    used_numbers.add(num)
+                except ValueError:
+                    pass
+                skipped_count += 1
+                logger.info(f"Skipped (already sequential): {img.name}")
+            else:
+                files_to_rename.append(img)
+        
+        if not files_to_rename:
+            # リネーム対象がない場合
+            return skipped_count, 0, []
+        
+        # パス1: 一時ファイル名にリネーム（衝突回避）
         renaming_entries = []
         
-        for i, img in enumerate(images):
-            # ターゲット名を計算
-            ext = img.suffix
-            target_name = f"{prefix}{str(i + 1).zfill(digits)}{ext}"
-            
-            # 既に名前が一致している場合はスキップ
-            if img.name == target_name:
-                success_count += 1
-                continue
-                
+        for i, img in enumerate(files_to_rename):
             temp_name = f"__temp_rename_{i:06d}__" + img.suffix
             temp_path = img.parent / temp_name
             try:
                 os.rename(img, temp_path)
-                renaming_entries.append((temp_path, i, img.name))
+                renaming_entries.append((temp_path, img.name))
             except Exception as e:
                 errors.append(f"{img.name}: {e}")
                 fail_count += 1
-            
-            # 5000件ごとにメモリ解放
-            if (i + 1) % 5000 == 0:
-                gc.collect()
         
-        # パス2: 一時ファイルを連番にリネーム
-        for j, (temp_path, index, original_name) in enumerate(renaming_entries):
+        # パス2: 一時ファイルを連番にリネーム（空き番号を使用）
+        next_number = 1
+        
+        for j, (temp_path, original_name) in enumerate(renaming_entries):
+            # 空き番号を探す
+            while next_number in used_numbers:
+                next_number += 1
+            
             ext = temp_path.suffix
-            new_name = f"{prefix}{str(index + 1).zfill(digits)}{ext}"
+            new_name = f"{prefix}{str(next_number).zfill(digits)}{ext}"
             new_path = temp_path.parent / new_name
+            
             try:
                 os.rename(temp_path, new_path)
                 logger.info(f"Renamed: {original_name} -> {new_name}")
+                used_numbers.add(next_number)  # 使用済みに追加
+                next_number += 1
                 success_count += 1
             except Exception as e:
                 errors.append(f"{temp_path.name}: {e}")
@@ -230,5 +270,8 @@ class ImageConverter:
         
         # 最終メモリ解放
         gc.collect()
+        
+        # スキップ数を成功数に含める
+        success_count += skipped_count
         
         return success_count, fail_count, errors

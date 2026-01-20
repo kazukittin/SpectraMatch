@@ -22,7 +22,7 @@ from PySide6.QtGui import QPixmap, QImage
 from PySide6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QLabel,
     QFrame, QCheckBox, QScrollArea, QPushButton,
-    QGridLayout, QGroupBox, QSizePolicy
+    QGridLayout, QGroupBox, QSizePolicy, QSpinBox
 )
 import cv2
 import numpy as np
@@ -499,6 +499,9 @@ class ImageGridWidget(QScrollArea):
         self.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
         self.setVerticalScrollBarPolicy(Qt.ScrollBarAsNeeded)
         
+        # フォーカスポリシーを設定（キーボードイベントを受け取るため）
+        self.setFocusPolicy(Qt.StrongFocus)
+        
         self.container = QWidget()
         self.container.setStyleSheet("background-color: #1e1e1e;")
         self.layout = QVBoxLayout(self.container)
@@ -584,9 +587,31 @@ class ImageGridWidget(QScrollArea):
         next_btn.clicked.connect(self._go_next_page)
         self.pagination_layout.addWidget(next_btn)
         
+        # ページ番号直接入力
+        self.page_input = QSpinBox()
+        self.page_input.setRange(1, self.total_pages)
+        self.page_input.setValue(self.current_page + 1)
+        self.page_input.setFixedSize(70, 40)
+        self.page_input.setAlignment(Qt.AlignCenter)
+        self.page_input.setStyleSheet("""
+            QSpinBox {
+                background-color: #2a2a2a;
+                color: #e0e0e0;
+                border: 1px solid #4a4a4a;
+                border-radius: 4px;
+                font-size: 14px;
+            }
+            QSpinBox:focus {
+                border: 1px solid #00ffff;
+            }
+        """)
+        # Enterキーを押した時のみページ移動
+        self.page_input.lineEdit().returnPressed.connect(self._on_page_input_changed)
+        self.pagination_layout.addWidget(self.page_input)
+        
         # ラベル
-        info_label = QLabel(f" {self.current_page + 1}/{self.total_pages} ")
-        info_label.setStyleSheet("color: #aaa; margin-left: 10px; font-weight: bold;")
+        info_label = QLabel(f"/ {self.total_pages}")
+        info_label.setStyleSheet("color: #aaa; margin-left: 5px; font-weight: bold;")
         self.pagination_layout.addWidget(info_label)
 
     def _add_page_button(self, page_index: int, is_current: bool = False):
@@ -638,6 +663,14 @@ class ImageGridWidget(QScrollArea):
             self.current_page += 1
             self._display_current_page()
     
+    def _on_page_input_changed(self):
+        """ページ番号入力が変更された時"""
+        if hasattr(self, 'page_input'):
+            new_page = self.page_input.value() - 1  # 0-indexed
+            if 0 <= new_page < self.total_pages and new_page != self.current_page:
+                self.current_page = new_page
+                self._display_current_page()
+    
     def _display_current_page(self):
         """現在のページを表示"""
         # 既存ウィジェットをクリア
@@ -685,12 +718,35 @@ class ImageGridWidget(QScrollArea):
         
         self.layout.addStretch()
         
-        # フォーカス復元
-        if self.last_focused_path:
-            self._restore_focus()
+        # フォーカス設定（復元または最初の画像）
+        cards = self._get_all_cards()
+        if cards:
+            if self.last_focused_path:
+                # 保存されたパスの画像を探す
+                found = False
+                for i, card in enumerate(cards):
+                    if card.image_info.path == self.last_focused_path:
+                        self._focus_index = i
+                        card.set_focused(True)
+                        self.image_selected.emit(card.image_info)
+                        found = True
+                        break
+                if not found:
+                    # 見つからなければ最初の画像にフォーカス
+                    self._focus_index = 0
+                    cards[0].set_focused(True)
+                    self.image_selected.emit(cards[0].image_info)
+            else:
+                # 最初の画像にフォーカス
+                self._focus_index = 0
+                cards[0].set_focused(True)
+                self.image_selected.emit(cards[0].image_info)
         
         # スクロールを先頭に
         self.verticalScrollBar().setValue(0)
+        
+        # キーボードフォーカスをこのウィジェットに設定
+        self.setFocus()
     
     def clear(self):
         """グリッドをクリア"""
@@ -711,15 +767,21 @@ class ImageGridWidget(QScrollArea):
             self.pagination_widget = None
     
     def set_groups(self, groups: List[SimilarityGroup]):
-        """類似グループを設定"""
+        """類似グループを設定（類似度が高い順にソート）"""
         self.clear()
         
         if not groups:
             self.empty_label.setText("類似画像は見つかりませんでした")
             return
         
-        self.all_groups = groups
-        self.total_pages = (len(groups) + self.GROUPS_PER_PAGE - 1) // self.GROUPS_PER_PAGE
+        # グループIDが大きい順（降順）で並べる
+        sorted_groups = sorted(
+            groups,
+            key=lambda g: -g.group_id  # グループIDの降順
+        )
+        
+        self.all_groups = sorted_groups
+        self.total_pages = (len(sorted_groups) + self.GROUPS_PER_PAGE - 1) // self.GROUPS_PER_PAGE
         self.current_page = 0
         
         self._display_current_page()
@@ -896,6 +958,144 @@ class ImageGridWidget(QScrollArea):
             card = cards[self._focus_index]
             card.set_delete(not card.is_marked_delete)
     
+    def select_next_group(self):
+        """次のグループの最初の画像を選択"""
+        if not self.group_widgets:
+            return
+        
+        cards = self._get_all_cards()
+        if not cards:
+            return
+        
+        # 現在のフォーカスを解除
+        if 0 <= self._focus_index < len(cards):
+            cards[self._focus_index].set_focused(False)
+        
+        # 現在のカードがどのグループに属しているか探す
+        current_group_idx = 0
+        card_count = 0
+        for i, widget in enumerate(self.group_widgets):
+            widget_card_count = len(widget.cards)
+            if self._focus_index < card_count + widget_card_count:
+                current_group_idx = i
+                break
+            card_count += widget_card_count
+        
+        # 次のグループへ
+        next_group_idx = current_group_idx + 1
+        if next_group_idx >= len(self.group_widgets):
+            # 次のページへ
+            if self.current_page < self.total_pages - 1:
+                self._go_next_page()
+                self._focus_index = 0
+                cards = self._get_all_cards()
+            else:
+                # 最後のグループの最初へ
+                self._focus_index = card_count
+        else:
+            # 次のグループの最初のカードへ
+            new_index = 0
+            for i in range(next_group_idx):
+                new_index += len(self.group_widgets[i].cards)
+            self._focus_index = new_index
+        
+        self._update_focus(self._get_all_cards())
+    
+    def select_prev_group(self):
+        """前のグループの最初の画像を選択"""
+        if not self.group_widgets:
+            return
+        
+        cards = self._get_all_cards()
+        if not cards:
+            return
+        
+        # 現在のフォーカスを解除
+        if 0 <= self._focus_index < len(cards):
+            cards[self._focus_index].set_focused(False)
+        
+        # 現在のカードがどのグループに属しているか探す
+        current_group_idx = 0
+        card_count = 0
+        for i, widget in enumerate(self.group_widgets):
+            widget_card_count = len(widget.cards)
+            if self._focus_index < card_count + widget_card_count:
+                current_group_idx = i
+                # 現在グループの最初にいるかチェック
+                if self._focus_index == card_count:
+                    # 既に最初にいる場合は前のグループへ
+                    current_group_idx = i - 1
+                break
+            card_count += widget_card_count
+        
+        if current_group_idx < 0:
+            # 前のページへ
+            if self.current_page > 0:
+                self._go_prev_page()
+                cards = self._get_all_cards()
+                # 最後のグループの最初へ
+                if self.group_widgets:
+                    new_index = 0
+                    for i in range(len(self.group_widgets) - 1):
+                        new_index += len(self.group_widgets[i].cards)
+                    self._focus_index = new_index
+            else:
+                self._focus_index = 0
+        else:
+            # 前のグループの最初のカードへ
+            new_index = 0
+            for i in range(current_group_idx):
+                new_index += len(self.group_widgets[i].cards)
+            self._focus_index = new_index
+        
+        self._update_focus(self._get_all_cards())
+    
+    def select_first_image(self):
+        """現在ページの最初の画像を選択"""
+        cards = self._get_all_cards()
+        if not cards:
+            return
+        
+        if 0 <= self._focus_index < len(cards):
+            cards[self._focus_index].set_focused(False)
+        
+        self._focus_index = 0
+        self._update_focus(cards)
+    
+    def select_last_image(self):
+        """現在ページの最後の画像を選択"""
+        cards = self._get_all_cards()
+        if not cards:
+            return
+        
+        if 0 <= self._focus_index < len(cards):
+            cards[self._focus_index].set_focused(False)
+        
+        self._focus_index = len(cards) - 1
+        self._update_focus(cards)
+    
+    def go_page_up(self):
+        """前のページへ移動"""
+        if self.current_page > 0:
+            cards = self._get_all_cards()
+            if 0 <= self._focus_index < len(cards):
+                cards[self._focus_index].set_focused(False)
+            
+            self._go_prev_page()
+            self._focus_index = 0
+            self._update_focus(self._get_all_cards())
+    
+    def go_page_down(self):
+        """次のページへ移動"""
+        if self.current_page < self.total_pages - 1:
+            cards = self._get_all_cards()
+            if 0 <= self._focus_index < len(cards):
+                cards[self._focus_index].set_focused(False)
+            
+            self._go_next_page()
+            self._focus_index = 0
+            self._update_focus(self._get_all_cards())
+    
     def keyPressEvent(self, event):
         """キーイベント処理"""
         # Spaceキーでチェック切り替え
@@ -909,6 +1109,30 @@ class ImageGridWidget(QScrollArea):
             return
         elif event.key() == Qt.Key_Left:
             self.select_prev_image()
+            event.accept()
+            return
+        elif event.key() == Qt.Key_Down:
+            self.select_next_group()
+            event.accept()
+            return
+        elif event.key() == Qt.Key_Up:
+            self.select_prev_group()
+            event.accept()
+            return
+        elif event.key() == Qt.Key_PageDown:
+            self.go_page_down()
+            event.accept()
+            return
+        elif event.key() == Qt.Key_PageUp:
+            self.go_page_up()
+            event.accept()
+            return
+        elif event.key() == Qt.Key_Home:
+            self.select_first_image()
+            event.accept()
+            return
+        elif event.key() == Qt.Key_End:
+            self.select_last_image()
             event.accept()
             return
             

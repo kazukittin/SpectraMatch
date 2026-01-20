@@ -305,40 +305,6 @@ class MainWindow(QMainWindow):
         """)
         footer_layout.addWidget(self.scan_btn)
         
-        # スマート全選択ボタン
-        self.smart_select_btn = QPushButton("⚡ 全選択")
-        self.smart_select_btn.setMinimumHeight(40)
-        self.smart_select_btn.setMinimumWidth(100)
-        self.smart_select_btn.setToolTip(
-            "⚡ スマート全選択\n\n"
-            "全グループで品質スコアに基づいて自動選択します：\n"
-            "• 解像度（高い方を優先）\n"
-            "• 鮮明度（ブレが少ない方を優先）\n"
-            "• ファイルサイズ（大きい方を優先）\n\n"
-            "各グループで最良の1枚を残し、他を削除対象にします。"
-        )
-        self.smart_select_btn.setEnabled(False)
-        self.smart_select_btn.clicked.connect(self._on_smart_select_all)
-        self.smart_select_btn.setStyleSheet("""
-            QPushButton {
-                background-color: #9b59b6;
-                color: white;
-                font-weight: bold;
-                padding: 8px 16px;
-                border-radius: 4px;
-                border: 2px solid transparent;
-            }
-            QPushButton:hover {
-                background-color: #a569bd;
-                border: 2px solid #9b59b6;
-            }
-            QPushButton:disabled {
-                background-color: #4a4a4a;
-                color: #808080;
-            }
-        """)
-        footer_layout.addWidget(self.smart_select_btn)
-        
         # 中止ボタン
         self.stop_btn = QPushButton("⏹ 中止")
         self.stop_btn.setMinimumHeight(40)
@@ -544,14 +510,8 @@ class MainWindow(QMainWindow):
     
     def _handle_select_all_shortcut(self):
         """Ctrl+A ショートカットハンドラ"""
-        if self.current_view_mode == "similar":
-            if self.smart_select_btn.isEnabled():
-                self._on_smart_select_all()
-        else:
-            # ブレ画像モードでの全選択
-            # TODO: 現在のページだけでなく全画像を対象にするか要検討
-            # ここでは現在のページの画像を全選択する実装にする
-            pass
+        # 全選択機能は削除済み
+        pass
     
     def _connect_signals(self):
         """シグナル接続"""
@@ -814,7 +774,6 @@ class MainWindow(QMainWindow):
         self.settings_btn.setEnabled(False)  # スキャン中は設定変更不可
         self.algo_combo.setEnabled(False)
         self.delete_btn.setEnabled(False)
-        self.smart_select_btn.setEnabled(False)
         self.image_grid.clear()
         self.progress_container.setVisible(True)
         self.progress_bar.setVisible(True)
@@ -866,7 +825,6 @@ class MainWindow(QMainWindow):
             )
             self.status_label.setStyleSheet("color: #2ecc71;")
             self.progress_label.setText("スキャン完了")
-            self.smart_select_btn.setEnabled(True)
         else:
             cache_info = f", キャッシュ: {result.cached_files}" if result.cached_files > 0 else ""
             self.status_label.setText(
@@ -874,7 +832,6 @@ class MainWindow(QMainWindow):
             )
             self.status_label.setStyleSheet("color: #3498db;")
             self.progress_label.setText("類似画像は見つかりませんでした")
-            self.smart_select_btn.setEnabled(False)
     
     @Slot(str)
     def _on_scan_error(self, error: str):
@@ -917,7 +874,7 @@ class MainWindow(QMainWindow):
             self, "削除確認",
             f"{len(files)}枚の画像をゴミ箱に移動します。\n"
             "続行しますか？",
-            QMessageBox.Yes | QMessageBox.No, QMessageBox.No
+            QMessageBox.Yes | QMessageBox.No, QMessageBox.Yes
         )
         
         if reply != QMessageBox.Yes:
@@ -933,7 +890,7 @@ class MainWindow(QMainWindow):
                 "send2trashがインストールされていません。\n"
                 "ファイルを完全に削除しますか？\n"
                 "（pip install Send2Trash でインストール推奨）",
-                QMessageBox.Yes | QMessageBox.No, QMessageBox.No
+                QMessageBox.Yes | QMessageBox.No, QMessageBox.Yes
             )
             if reply != QMessageBox.Yes:
                 return
@@ -1010,12 +967,7 @@ class MainWindow(QMainWindow):
         self.progress_label.setText(f"🗑️ {len(deleted_files)}枚を削除しました")
         QMessageBox.information(self, "完了", msg)
     
-    @Slot()
-    def _on_smart_select_all(self):
-        """全グループでスマート自動選択を実行"""
-        self.image_grid.smart_select_all()
-        self.progress_label.setText("⚡ スマート選択を適用しました")
-    
+
     @Slot()
     def _on_clear_cache(self):
         """キャッシュを削除"""
