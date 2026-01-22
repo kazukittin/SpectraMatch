@@ -16,8 +16,8 @@ hiddenimports = [
     'PySide6.QtCore', 'PySide6.QtGui', 'PySide6.QtWidgets',
     'cv2', 'numpy', 'PIL', 'PIL.Image', 'send2trash',
     'core', 'core.scanner', 'core.clip_engine', 'core.database', 
-    'core.comparator', 'core.hasher', 'core.faiss_engine',
-    'gui', 'gui.main_window', 'gui.image_grid', 'gui.styles'
+    'core.comparator', 'core.hasher', 'core.faiss_engine', 'core.image_converter',
+    'gui', 'gui.main_window', 'gui.image_grid', 'gui.styles', 'gui.converter_dialog'
 ]
 
 # 3. 除外モジュール（ここで AIライブラリを明示的に除外）
