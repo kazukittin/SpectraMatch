@@ -18,6 +18,7 @@ from PySide6.QtWidgets import (
 )
 
 from core.image_converter import ImageConverter
+from core.database import ImageDatabase
 
 logger = logging.getLogger(__name__)
 
@@ -29,11 +30,12 @@ class CombinedThread(QThread):
     progress_updated = Signal(int, int, str)
     finished = Signal(int, int, list)  # success, fail, errors
     
-    def __init__(self, folder_path: Path, digits: int = 3):
+    def __init__(self, folder_path: Path, digits: int = 3, check_cache: bool = True):
         super().__init__()
         self.folder_path = folder_path
         self.digits = digits
         self.is_running = True
+        self.check_cache = check_cache  # キャッシュチェックを有効化
         
     def run(self):
         total_success = 0
@@ -43,8 +45,17 @@ class CombinedThread(QThread):
         # 1. JPG変換処理
         # 連番リネーム済みのファイル (NNN.jpg) はスキップ
         # 連番だがJPGでないファイル (NNN.png) は変換対象
+        # キャッシュチェックを有効にして、既に解析済みの画像はスキップ
         
-        target_files = ImageConverter.get_target_files(self.folder_path)
+        # データベース接続を一度だけ確立
+        db = ImageDatabase() if self.check_cache else None
+        
+        try:
+            target_files = ImageConverter.get_target_files(
+                self.folder_path, 
+                check_cache=self.check_cache,
+                db=db
+            )
         total = len(target_files)
         
         # 連番チェック用関数
@@ -81,6 +92,11 @@ class CombinedThread(QThread):
             
             if (i + 1) % 100 == 0:
                 gc.collect()
+        
+        finally:
+            # データベース接続をクローズ
+            if db:
+                db.close()
         
         # メモリ解放
         gc.collect()
@@ -121,6 +137,7 @@ class ConverterDialog(QDialog):
         super().__init__(parent)
         self.current_folder = default_path if default_path and default_path.exists() else Path.home()
         self.target_files: List[Path] = []
+        self.target_files_to_convert: List[Path] = []  # キャッシュを除いた実際の変換対象
         self.all_images: List[Path] = []
         self.worker_thread = None
         
@@ -181,7 +198,8 @@ class ConverterDialog(QDialog):
             "以下の手順で画像を整理します：\n"
             "1. 全ての画像をJPG形式に変換（元ファイルは削除）\n"
             "2. ファイル名を3桁の連番にリネーム（例: 001.jpg, 002.jpg ...）\n\n"
-            "※ 既に「NNN.jpg」形式になっているファイルはスキップされます。"
+            "※ 既に「NNN.jpg」形式になっているファイルはスキップされます。\n"
+            "※ 既に解析済み（キャッシュあり）の画像は再度解析されません。"
         )
         desc_label.setStyleSheet("color: #aaa; font-size: 13px; line-height: 1.4;")
         desc_layout.addWidget(desc_label)
@@ -240,27 +258,52 @@ class ConverterDialog(QDialog):
         from PySide6.QtWidgets import QApplication
         QApplication.processEvents()
         
-        self.target_files = ImageConverter.get_target_files(self.current_folder)
+        # キャッシュなしで全ファイルを取得（ステータス表示用）
+        self.target_files = ImageConverter.get_target_files(self.current_folder, check_cache=False)
         self.all_images = ImageConverter.get_all_images(self.current_folder)
+        
+        # キャッシュありでファイルを取得（実際の変換対象数）
+        db = ImageDatabase()
+        try:
+            self.target_files_to_convert = ImageConverter.get_target_files(
+                self.current_folder, check_cache=True, db=db
+            )
+        finally:
+            db.close()
         
         self._update_status()
         
     def _update_status(self):
-        convert_count = len(self.target_files)
+        convert_count_total = len(self.target_files)  # 全変換対象数
+        convert_count_actual = len(self.target_files_to_convert)  # キャッシュを除いた実際の変換数
+        cached_count = convert_count_total - convert_count_actual
         total_count = len(self.all_images)
         
         status_text = f"現在の画像ファイル: {total_count}枚"
-        if convert_count > 0:
-            status_text += f"\nうちJPG変換対象: {convert_count}枚 (PNG/BMP/WEBP等)"
+        if convert_count_total > 0:
+            status_text += f"\nうちJPG変換対象: {convert_count_total}枚 (PNG/BMP/WEBP等)"
+            if cached_count > 0:
+                status_text += f"\n  - キャッシュ済み（スキップ）: {cached_count}枚"
+                status_text += f"\n  - 実際の変換対象: {convert_count_actual}枚"
             
         self.status_label.setText(status_text)
-        self.run_btn.setEnabled(total_count > 0 or convert_count > 0)
+        self.run_btn.setEnabled(total_count > 0 or convert_count_actual > 0)
             
     def _on_run(self):
         # Confirmation
+        convert_count_total = len(self.target_files)
+        convert_count_actual = len(self.target_files_to_convert)
+        cached_count = convert_count_total - convert_count_actual
+        
         msg = (
             f"フォルダ内の画像を整理します。\n"
-            f"・JPG変換: {len(self.target_files)}枚\n"
+            f"・JPG変換対象: {convert_count_total}枚\n"
+        )
+        
+        if cached_count > 0:
+            msg += f"  (うちキャッシュ済みでスキップ: {cached_count}枚)\n"
+        
+        msg += (
             f"・連番リネーム: 全画像\n\n"
             "実行してもよろしいですか？"
         )

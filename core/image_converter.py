@@ -3,6 +3,7 @@ from PIL import Image
 import os
 import gc
 import logging
+from typing import Optional
 
 logger = logging.getLogger(__name__)
 
@@ -21,8 +22,41 @@ class ImageConverter:
     }
     
     @staticmethod
-    def get_target_files(folder_path: Path) -> list[Path]:
-        """指定フォルダ内の変換対象ファイルリストを取得"""
+    def has_cache(file_path: Path, db=None) -> bool:
+        """
+        指定ファイルがキャッシュ（解析済み）かどうかをチェック
+        
+        Args:
+            file_path: チェック対象のファイルパス
+            db: ImageDatabaseインスタンス（オプション）
+            
+        Returns:
+            bool: キャッシュがあればTrue
+        """
+        from .database import ImageDatabase
+        
+        should_close = False
+        if db is None:
+            db = ImageDatabase()
+            should_close = True
+            
+        try:
+            # ファイルが変更されていなければキャッシュあり
+            return not db.is_file_changed(file_path)
+        finally:
+            if should_close:
+                db.close()
+    
+    @staticmethod
+    def get_target_files(folder_path: Path, check_cache: bool = False, db=None) -> list[Path]:
+        """
+        指定フォルダ内の変換対象ファイルリストを取得
+        
+        Args:
+            folder_path: 対象フォルダ
+            check_cache: Trueの場合、キャッシュがある画像をスキップ
+            db: ImageDatabaseインスタンス（オプション）
+        """
         if not folder_path.exists():
             return []
             
@@ -39,6 +73,10 @@ class ImageConverter:
             if item.suffix.lower() in ImageConverter.SUPPORTED_EXTENSIONS:
                 # ファイルサイズが0より大きいことも確認
                 if item.stat().st_size > 0:
+                    # キャッシュチェックが有効な場合、キャッシュがある画像はスキップ
+                    if check_cache and ImageConverter.has_cache(item, db):
+                        logger.info(f"Skipping cached file: {item.name}")
+                        continue
                     targets.append(item)
         return targets
     
