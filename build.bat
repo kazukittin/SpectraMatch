@@ -42,6 +42,9 @@ if exist "dist" (
     echo    - dist フォルダを削除しています...
     rmdir /s /q "dist"
 )
+echo    - Pythonキャッシュを削除しています...
+for /d /r %%d in (__pycache__) do @if exist "%%d" rmdir /s /q "%%d"
+del /s /q *.pyc >nul 2>&1
 echo    ✅ キャッシュを削除しました
 
 echo.
