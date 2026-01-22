@@ -33,7 +33,26 @@ if errorlevel 1 (
 echo    ✅ PyInstaller OK
 
 echo.
-echo [3/3] EXE をビルド中...（数分かかります）
+echo [3/5] 古いビルドキャッシュを削除中...
+if exist "build" (
+    echo    - build フォルダを削除しています...
+    rmdir /s /q "build"
+)
+if exist "dist" (
+    echo    - dist フォルダを削除しています...
+    rmdir /s /q "dist"
+)
+echo    ✅ キャッシュを削除しました
+
+echo.
+echo [4/5] 古い .spec キャッシュをクリーンアップ中...
+REM PyInstallerの内部キャッシュもクリーンアップ
+if exist "SpectraMatch.spec" (
+    echo    ✅ specファイルを使用してビルドします
+)
+
+echo.
+echo [5/5] EXE をビルド中...（数分かかります）
 echo.
 python build_exe.py
 
