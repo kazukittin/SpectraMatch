@@ -56,42 +56,42 @@ class CombinedThread(QThread):
                 check_cache=self.check_cache,
                 db=db
             )
-        total = len(target_files)
-        
-        # 連番チェック用関数
-        def is_already_processed(path: Path) -> bool:
-            # NNN.jpg 形式かどうか
-            if path.suffix.lower() not in ['.jpg', '.jpeg']:
-                return False
-            stem = path.stem
-            import re
-            return bool(re.match(rf'^\d{{{self.digits}}}$', stem))
+            total = len(target_files)
             
-        filtered_targets = []
-        for p in target_files:
-            if is_already_processed(p):
-                continue
-            filtered_targets.append(p)
-            
-        # 変換実行
-        for i, file_path in enumerate(filtered_targets):
-            if not self.is_running:
-                break
+            # 連番チェック用関数
+            def is_already_processed(path: Path) -> bool:
+                # NNN.jpg 形式かどうか
+                if path.suffix.lower() not in ['.jpg', '.jpeg']:
+                    return False
+                stem = path.stem
+                import re
+                return bool(re.match(rf'^\d{{{self.digits}}}$', stem))
                 
-            msg = f"Converting ({i+1}/{len(filtered_targets)}): {file_path.name}"
-            self.progress_updated.emit(i, len(filtered_targets), msg)
-            
-            success, error = ImageConverter.convert_to_jpg(file_path)
-            
-            if success:
-                total_success += 1
-            else:
-                total_fail += 1
-                all_errors.append(f"Convert Error {file_path.name}: {error}")
-                logger.error(f"Failed to convert {file_path}: {error}")
-            
-            if (i + 1) % 100 == 0:
-                gc.collect()
+            filtered_targets = []
+            for p in target_files:
+                if is_already_processed(p):
+                    continue
+                filtered_targets.append(p)
+                
+            # 変換実行
+            for i, file_path in enumerate(filtered_targets):
+                if not self.is_running:
+                    break
+                    
+                msg = f"Converting ({i+1}/{len(filtered_targets)}): {file_path.name}"
+                self.progress_updated.emit(i, len(filtered_targets), msg)
+                
+                success, error = ImageConverter.convert_to_jpg(file_path)
+                
+                if success:
+                    total_success += 1
+                else:
+                    total_fail += 1
+                    all_errors.append(f"Convert Error {file_path.name}: {error}")
+                    logger.error(f"Failed to convert {file_path}: {error}")
+                
+                if (i + 1) % 100 == 0:
+                    gc.collect()
         
         finally:
             # データベース接続をクローズ
