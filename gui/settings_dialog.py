@@ -11,7 +11,7 @@ from typing import List, Optional
 from PySide6.QtCore import Qt, Signal
 from PySide6.QtWidgets import (
     QDialog, QVBoxLayout, QHBoxLayout, QLabel, QPushButton,
-    QSlider, QListWidget, QListWidgetItem, QFileDialog,
+    QComboBox, QListWidget, QListWidgetItem, QFileDialog,
     QFrame, QMessageBox, QGroupBox, QWidget, QTabWidget
 )
 
@@ -176,38 +176,47 @@ class SettingsDialog(QDialog):
         
         # 説明
         threshold_desc = QLabel(
-            "類似度がこの値以上の画像ペアを「類似」として検出します。\n"
-            "値を下げると検出数が増え、上げると厳密になります。"
+            "画像の判定基準を選択してください。\n"
+            "「厳密」にするほど、ほぼ同じ画像だけが検出されます。"
         )
         threshold_desc.setStyleSheet("color: #95a5a6; font-size: 11px;")
         threshold_desc.setWordWrap(True)
         threshold_layout.addWidget(threshold_desc)
         
-        # スライダーと値表示
-        slider_layout = QHBoxLayout()
-        slider_layout.setSpacing(16)
+        # コンボボックス
+        self.threshold_combo = QComboBox()
+        self.threshold_combo.addItems([
+            "非常に緩い",  # 60%
+            "緩い",        # 75%
+            "標準",        # 85%
+            "やや厳密",    # 92%
+            "厳密"         # 98%
+        ])
         
-        self.threshold_slider = QSlider(Qt.Horizontal)
-        self.threshold_slider.setRange(50, 99)
-        self.threshold_slider.setValue(85)
-        self.threshold_slider.setTickPosition(QSlider.TicksBelow)
-        self.threshold_slider.setTickInterval(10)
-        self.threshold_slider.valueChanged.connect(self._on_threshold_changed)
-        slider_layout.addWidget(self.threshold_slider)
-        
-        self.threshold_value_label = QLabel("85%")
-        self.threshold_value_label.setFixedWidth(60)
-        self.threshold_value_label.setAlignment(Qt.AlignCenter)
-        self.threshold_value_label.setStyleSheet(
-            "background-color: #00ffff; color: #1e1e1e; "
-            "font-weight: bold; border-radius: 4px; padding: 8px; font-size: 14px;"
-        )
-        slider_layout.addWidget(self.threshold_value_label)
-        
-        threshold_layout.addLayout(slider_layout)
+        self.threshold_combo.setStyleSheet("""
+            QComboBox {
+                padding: 8px;
+                background-color: #4a4a4a;
+                color: white;
+                border: 1px solid #5a5a5a;
+                border-radius: 4px;
+                font-size: 14px;
+            }
+            QComboBox:hover {
+                background-color: #5a5a5a;
+            }
+            QComboBox QAbstractItemView {
+                background-color: #323232;
+                color: white;
+                selection-background-color: #00ffff;
+                selection-color: #1e1e1e;
+            }
+        """)
+        self.threshold_combo.currentIndexChanged.connect(self._on_threshold_changed)
+        threshold_layout.addWidget(self.threshold_combo)
         
         # 閾値の目安
-        self.threshold_hint = QLabel("標準 (85%以上を類似とみなす)")
+        self.threshold_hint = QLabel("標準 (同一画像の異なるバージョン)")
         self.threshold_hint.setStyleSheet("color: #f39c12; font-size: 12px;")
         threshold_layout.addWidget(self.threshold_hint)
         
@@ -284,8 +293,16 @@ class SettingsDialog(QDialog):
             self.folder_list.addItem(item)
         
         # 閾値
-        self.threshold_slider.setValue(self.current_threshold)
-        self._on_threshold_changed(self.current_threshold)
+        # 最も近い設定値を選択
+        values = [60, 75, 85, 92, 98]
+        closest_value = min(values, key=lambda x: abs(x - self.current_threshold))
+        try:
+            index = values.index(closest_value)
+            self.threshold_combo.setCurrentIndex(index)
+        except ValueError:
+            self.threshold_combo.setCurrentIndex(2)  # デフォルト: 標準
+        
+        self._on_threshold_changed(index)
     
     def _update_cache_info(self):
         """キャッシュ情報を更新"""
@@ -320,28 +337,27 @@ class SettingsDialog(QDialog):
         if current:
             self.folder_list.takeItem(self.folder_list.row(current))
     
-    def _on_threshold_changed(self, value: int):
-        """閾値変更"""
-        self.threshold_value_label.setText(f"{value}%")
+    def _on_threshold_changed(self, index: int):
+        """閾値変更 (ComboBox changed)"""
+        # index mapping
+        # 0: 非常に緩い (60%)
+        # 1: 緩い (75%)
+        # 2: 標準 (85%)
+        # 3: やや厳密 (92%)
+        # 4: 厳密 (98%)
         
-        if value >= 95:
-            hint = "厳密 (ほぼ同一画像のみ)"
-            color = "#e74c3c"
-        elif value >= 90:
-            hint = "やや厳密 (高い類似度)"
-            color = "#e67e22"
-        elif value >= 80:
-            hint = "標準 (同一画像の異なるバージョン)"
-            color = "#f39c12"
-        elif value >= 70:
-            hint = "緩い (類似した構図)"
-            color = "#27ae60"
-        else:
-            hint = "非常に緩い (要注意: 誤検出が増える可能性)"
-            color = "#9b59b6"
+        hints = [
+            ("非常に緩い (誤検出が増える可能性)", "#9b59b6"),
+            ("緩い (類似した構図も検出)", "#27ae60"),
+            ("標準 (同一画像の異なるバージョン)", "#f39c12"),
+            ("やや厳密 (高い類似度が必要)", "#e67e22"),
+            ("厳密 (ほぼ同一画像のみ)", "#e74c3c")
+        ]
         
-        self.threshold_hint.setText(hint)
-        self.threshold_hint.setStyleSheet(f"color: {color}; font-size: 12px;")
+        if 0 <= index < len(hints):
+            text, color = hints[index]
+            self.threshold_hint.setText(text)
+            self.threshold_hint.setStyleSheet(f"color: {color}; font-size: 12px;")
     
     def _on_clear_cache(self):
         """キャッシュ削除"""
@@ -381,7 +397,12 @@ class SettingsDialog(QDialog):
             folders.append(item.data(Qt.UserRole))
         
         # 閾値を取得
-        threshold = self.threshold_slider.value()
+        values = [60, 75, 85, 92, 98]
+        index = self.threshold_combo.currentIndex()
+        if 0 <= index < len(values):
+            threshold = values[index]
+        else:
+            threshold = 85
         
         # シグナル発行
         self.settings_applied.emit(folders, threshold)
@@ -399,4 +420,8 @@ class SettingsDialog(QDialog):
     
     def get_threshold(self) -> int:
         """現在の閾値を取得"""
-        return self.threshold_slider.value()
+        values = [60, 75, 85, 92, 98]
+        index = self.threshold_combo.currentIndex()
+        if 0 <= index < len(values):
+            return values[index]
+        return 85
