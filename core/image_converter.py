@@ -121,6 +121,15 @@ class ImageConverter:
             # JPEGのパスを生成
             jpg_path = file_path.with_suffix('.jpg')
             
+            # .jpeg の場合はリネームで高速処理（画質劣化なし）
+            if file_path.suffix.lower() == '.jpeg':
+                try:
+                    os.replace(file_path, jpg_path)
+                    logger.info(f"Renamed .jpeg -> .jpg: {file_path}")
+                    return True, None
+                except Exception as e:
+                    logger.warning(f"Failed to rename jpeg directly: {e}")
+            
             # 既に同名のJPGが存在する場合は上書きすることになるが、
             # ImageMagickの挙動に合わせて変換を行う
             # ただし、PILで開いて保存する
@@ -219,6 +228,25 @@ class ImageConverter:
         # 指定桁数の数字のみかチェック（001〜999など）
         pattern = rf'^[0-9]{{{digits}}}$'
         return bool(re.match(pattern, name_without_ext))
+
+    @staticmethod
+    def is_already_processed(file_path: Path, digits: int = 3) -> bool:
+        """
+        ファイルが既に処理済み（JPG形式 かつ 連番ファイル名）かどうかを判定
+        
+        Args:
+            file_path: 対象ファイルパス
+            digits: 連番の桁数
+            
+        Returns:
+            bool: 処理済みならTrue
+        """
+        # JPG以外は未処理とみなす
+        if file_path.suffix.lower() != '.jpg':
+            return False
+            
+        # ファイル名が連番形式かチェック
+        return ImageConverter._is_sequential_name(file_path.name, digits)
     
     @staticmethod
     def rename_folder_sequential(folder_path: Path, prefix: str = "", digits: int = 3):

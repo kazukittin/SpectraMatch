@@ -58,18 +58,9 @@ class CombinedThread(QThread):
             )
             total = len(target_files)
             
-            # 連番チェック用関数
-            def is_already_processed(path: Path) -> bool:
-                # NNN.jpg 形式かどうか
-                if path.suffix.lower() not in ['.jpg', '.jpeg']:
-                    return False
-                stem = path.stem
-                import re
-                return bool(re.match(rf'^\d{{{self.digits}}}$', stem))
-                
             filtered_targets = []
             for p in target_files:
-                if is_already_processed(p):
+                if ImageConverter.is_already_processed(p, self.digits):
                     continue
                 filtered_targets.append(p)
                 
@@ -265,9 +256,16 @@ class ConverterDialog(QDialog):
         # キャッシュありでファイルを取得（実際の変換対象数）
         db = ImageDatabase()
         try:
-            self.target_files_to_convert = ImageConverter.get_target_files(
+            raw_targets = ImageConverter.get_target_files(
                 self.current_folder, check_cache=True, db=db
             )
+            
+            # 連番済み（001.jpg等）を除外
+            self.target_files_to_convert = []
+            for p in raw_targets:
+                if ImageConverter.is_already_processed(p):
+                    continue
+                self.target_files_to_convert.append(p)
         finally:
             db.close()
         
